@@ -132,10 +132,10 @@
     "pick_title_v": "{name} protection · {px} px · ±{v} px vertical",
     "pick_note_last": "At {px} px, the most movement allowed, the risk drops to {score} (no shift: {none}).",
     "pick_note_tail": "Re-optimizes when the bar changes and every night.",
-    "movement": "Movement per spacer",
-    "step_meta": "1 px every {minutes} min",
+    "movement": "Movement per spacer · 1 px every {minutes} min",
     "measure_again": "Measure again",
-    "hint_vertical": "Allow vertical shift"
+    "hint_vertical": "Allow vertical shift",
+    "pick_note_flat": "At {px} px the risk drops to {score} (no shift: {none}); more movement would not lower it."
   },
   "hotspot": {
     "side": {

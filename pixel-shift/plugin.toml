@@ -68,7 +68,7 @@ entry = "engine.luau"
 id = "lab"
 entry = "lab.luau"
 width = 980
-height = 840
+height = 920
 placement = "floating"
 position = "center"
 

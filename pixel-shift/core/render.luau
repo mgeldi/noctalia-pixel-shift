@@ -150,11 +150,21 @@ function M.frameHalves(left, right, x0: number, x1: number, fullW: number, rgb, 
 	part(right, mid, fullW)
 end
 
--- A bar of `rows` px along the bottom of columns [x0, x1), drawn in place.
-function M.underline(img, x0: number, x1: number, rows: number, rgb)
-	for y = math.max(img.h - rows, 0), img.h - 1 do
-		for x = math.max(x0, 0), math.min(x1, img.w) - 1 do
-			ppm.set(img, x, y, rgb[1], rgb[2], rgb[3])
+-- A box of `t` px lines around columns [x0, x1) over the full height, drawn
+-- in place (the same language as the overview's frame).
+function M.outline(img, x0: number, x1: number, t: number, rgb)
+	x0, x1 = math.max(x0, 0), math.min(x1, img.w)
+	if x1 <= x0 then
+		return
+	end
+	for k = 0, t - 1 do
+		for x = x0, x1 - 1 do
+			ppm.set(img, x, math.min(k, img.h - 1), rgb[1], rgb[2], rgb[3])
+			ppm.set(img, x, math.max(img.h - 1 - k, 0), rgb[1], rgb[2], rgb[3])
+		end
+		for y = 0, img.h - 1 do
+			ppm.set(img, math.min(x0 + k, img.w - 1), y, rgb[1], rgb[2], rgb[3])
+			ppm.set(img, math.max(x1 - 1 - k, 0), y, rgb[1], rgb[2], rgb[3])
 		end
 	end
 end

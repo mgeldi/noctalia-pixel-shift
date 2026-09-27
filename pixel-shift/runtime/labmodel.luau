@@ -282,14 +282,17 @@ function M.build(O, ui, ctx)
 		return { h = left.h, paths = { left = write("overview-l", bmp.encode(left)), right = write("overview-r", bmp.encode(right)) } }
 	end)
 	-- the two inspector strips are cached apart: a new strategy leaves "no shift" alone
-	-- the spot's own columns get a glow bracket along the bottom of both strips
+	-- the spot is framed in both strips, with a little room so a 2 px spot still
+	-- reads as a box
 	local mark = if sel then `{sel.x0}-{sel.x1}` else "-"
 	local function strip(slot: string, ev, key: string)
 		return files(O, ctx, `{slot}|{ui.view}|{key}|{captureKey}|{ctx.primary}|{rx0}|{mark}`, function()
 			local img, ox = stretch(ui.view, ev, key, rx0, rx1)
 			local out = render.zoom(img, ox, ox + rx1 - rx0, iy0, iy1, zoom)
 			if sel then
-				render.underline(out, (math.max(sel.x0, rx0) - rx0) * zoom, (math.min(sel.x1, rx1) - rx0) * zoom, 2 * zoom, ramp[230])
+				local pad = math.ceil(4 * (layout.scale or 1))
+				local a, b = math.max(sel.x0 - pad, rx0), math.min(sel.x1 + pad, rx1)
+				render.outline(out, (a - rx0) * zoom, (b - rx0) * zoom, zoom, ramp[230])
 			end
 			return { paths = { path = write(slot, bmp.encode(out)) } }
 		end)
@@ -301,7 +304,7 @@ function M.build(O, ui, ctx)
 		return { paths = { legend = write("legend", bmp.encode(render.legend(ramp, M.METER_W, 8))) } }
 	end)
 	-- what each hotspot looks like on the bar itself
-	-- one fixed 64:24 window around each spot, its columns underlined in glow
+	-- one fixed 64:24 window centred on each spot
 	local thumbs = files(O, ctx, `thumbs|{sKey}|{ctx.profile}|{seq}|{ctx.primary}`, function()
 		local barView = view("bar")
 		local rows = layout.barRows[2] - layout.barRows[1]
@@ -310,7 +313,6 @@ function M.build(O, ui, ctx)
 		for i, s in ipairs(spots) do
 			local x0 = math.clamp((s.x0 + s.x1) // 2 - winW // 2, 0, layout.w - winW)
 			local img = render.zoom(barView, x0, x0 + winW, layout.barRows[1], layout.barRows[2], 1)
-			render.underline(img, math.max(s.x0 - x0, 0), math.min(s.x1 - x0, winW), math.max(2, rows // 12), ramp[230])
 			paths[i] = write(`thumb-{i}`, bmp.encode(img))
 		end
 		return { paths = paths }

@@ -11,7 +11,7 @@ local seqN = 0
 local render
 
 -- spacing rhythm (px): inside a group / between related parts / between regions
-local TIGHT, NEAR, REGION = 6, 12, 18
+local TIGHT, NEAR, REGION = 6, 12, 16
 local BLOCK = 14 -- between blocks inside one card
 local CLEAR = "#00000000"
 local PIN_INK = "#15151a" -- pin numbers on the glow
@@ -210,7 +210,7 @@ local function pinRow(hotspots, pins, row: number, width: number, glow: string, 
 		table.insert(children, pin(hotspots[p.n] or { n = p.n }, glow, p.n == chosen))
 		cursor = left + 22
 	end
-	return ui.row({ height = 24, width = width, align = "center" }, children)
+	return ui.row({ height = 22, width = width, align = "center" }, children)
 end
 
 -- Are the images behind the current selection still being rendered?
@@ -442,7 +442,8 @@ end
 -- Risk for every movement budget, one bar per budget (paired with the
 -- vertical variant when it exists). The pick carries the glow; the first bar
 -- restates the no-shift score, so the chart and the result read as one story.
-local CHART_W, CHART_H = 500, 96
+local CHART_W, CHART_H = 500, 80
+local RIGHT_W = 904 - CHART_W - REGION -- the strategy card's right column
 
 local function barChart(d)
 	local c = d.curve
@@ -529,11 +530,10 @@ local function chips(d)
 	for i, it in ipairs(items) do
 		table.insert(if i <= 3 then rowA else rowB, it)
 	end
-	local rows = { meta(tr("lab.movement")), ui.row({ gap = TIGHT }, rowA) }
+	local rows = { meta(tr("lab.movement", { minutes = d.stepMinutes })), ui.row({ gap = TIGHT }, rowA) }
 	if #rowB > 0 then
 		table.insert(rows, ui.row({ gap = TIGHT }, rowB))
 	end
-	table.insert(rows, meta(tr("lab.step_meta", { minutes = d.stepMinutes })))
 	return ui.column({ gap = TIGHT, align = "start" }, rows)
 end
 
@@ -545,10 +545,10 @@ local function verticalToggle(m)
 			end }),
 			body(tr("lab.allow_vertical")),
 		}),
-		note(tr("lab.allow_vertical_note"), 330),
+		note(tr("lab.allow_vertical_note"), RIGHT_W),
 	}
 	if m.verticalError then
-		table.insert(items, note(tr("lab.vertical_error"), 330, "error"))
+		table.insert(items, note(tr("lab.vertical_error"), RIGHT_W, "error"))
 	end
 	return ui.column({ gap = 4 }, items)
 end
@@ -563,12 +563,14 @@ local function pickSummary(m, d)
 		then tr("lab.pick_title_v", { name = name, px = px, v = c.pickV })
 		else tr("lab.pick_title", { name = name, px = px })
 	local score, none = round(c.pickScore or d.score.strategy), round(d.score.none)
-	local line = if c.nextPx
-		then tr("lab.pick_note", { px = px, score = score, none = none, more = c.nextPx - px, save = math.max(round((c.pickScore or 0) - (c.nextScore or 0)), 0) })
-		else tr("lab.pick_note_last", { px = px, score = score, none = none })
+	local save = if c.nextPx then math.max(round((c.pickScore or 0) - (c.nextScore or 0)), 0) else 0
+	local line = if not c.nextPx
+		then tr("lab.pick_note_last", { px = px, score = score, none = none })
+		elseif save < 1 then tr("lab.pick_note_flat", { px = px, score = score, none = none })
+		else tr("lab.pick_note", { px = px, score = score, none = none, more = c.nextPx - px, save = save })
 	return ui.column({ gap = 4, align = "start" }, {
-		body(title, 330, "on_surface"),
-		note(line .. " " .. tr("lab.pick_note_tail"), 330),
+		body(title, RIGHT_W, "on_surface"),
+		note(line .. " " .. tr("lab.pick_note_tail"), RIGHT_W),
 	})
 end
 
@@ -668,7 +670,7 @@ local function strategyCard(m, d)
 	else
 		content = ui.row({ gap = REGION, align = "start" }, {
 			manualBlock(m, d),
-			ui.column({ gap = BLOCK, width = 330 }, { chips(d), verticalToggle(m) }),
+			ui.column({ gap = BLOCK, width = RIGHT_W }, { chips(d), verticalToggle(m) }),
 		})
 	end
 	return card({ ui.row({ gap = 10, align = "center" }, head), content }, { gap = NEAR })
