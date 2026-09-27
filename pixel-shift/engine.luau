@@ -620,7 +620,7 @@ local function applyStrategy(name: string, strategy, record: boolean?)
 			table.remove(meta.history)
 		end
 	end
-	meta.strategy = { ranges = table.clone(strategy.ranges), vertical = strategy.vertical or 0 }
+	meta.strategy = { ranges = table.clone(strategy.ranges), vertical = strategy.vertical or 0, lambdaT = strategy.lambdaT or saved.lambdaT }
 	persist()
 	labDirty = true
 	dataDirty = true
@@ -708,7 +708,10 @@ local function playVertical(now: number)
 		V = math.max(V, activeStrategy(name).vertical or 0)
 	end
 	local v = schedule.vertical(V, now)
-	if v ~= lastVertical then
+	-- once a minute, also repair a file that no longer matches the schedule
+	-- (deleted by the user, or left over from an older run)
+	local drifted = now % 60 == 0 and (vertical.active() ~= (v > 0))
+	if v ~= lastVertical or drifted then
 		lastVertical = v
 		vertical.apply(saved.verticalBase, v)
 		verticalCheckAt = if v > 0 then now + 5 else nil
@@ -892,9 +895,11 @@ local function sampleTask(name: string)
 		local geom = util.captureGeometry(out, bar)
 		local img = capture.grab(geom.geometry, geom.transpose)
 		if not img or exposure.isBlank(img) then
+			noctalia.log("pixel-shift: sample skipped on " .. name .. " (no capture or blank output)")
 			return
 		end
 		if img.w ~= O.layout.w or img.h ~= O.layout.h then
+			noctalia.log("pixel-shift: sample size changed on " .. name .. ", measuring again")
 			O.needsScan = true
 			return
 		end
@@ -903,6 +908,7 @@ local function sampleTask(name: string)
 		local vRows = if vertical.active() and lastVertical > 0 then math.floor(lastVertical * O.layout.scale + 0.5) else 0
 		local back = exposure.unshift(wear.linearFromRgb8(img), O.layout, util.displacements(O.layout, offs), vRows)
 		if not exposure.matchesBaseline(image.luma(back), O.baseL, O.layout) then
+			noctalia.log("pixel-shift: sample on " .. name .. " does not match the measured bar (locked screen, fullscreen app or new theme?)")
 			O.mismatches += 1
 			if O.mismatches >= 3 then
 				O.mismatches = 0
@@ -1168,6 +1174,9 @@ local function handle(cmd: string, arg)
 		local meta = name and saved.outputs[name]
 		if meta and meta.history and #meta.history > 0 then
 			local prev = table.remove(meta.history, 1)
+			if prev.lambdaT then
+				saved.lambdaT = prev.lambdaT
+			end
 			applyStrategy(name, prev, false)
 			if O then
 				O.preview = nil
@@ -1252,6 +1261,24 @@ function onIpc(event, payload)
 	elseif event == "view" or event == "mode" or event == "output" or event == "hotspot" then
 		handle(event, payload) -- drive the lab from scripts
 		dataDirty = true
+	elseif event == "lambda" then
+		-- protection level 0 (calm) .. 1 (max); previews, "apply" makes it active
+		if not ui.output then
+			for name in pairs(outputs) do
+				ui.output = ui.output or name
+			end
+		end
+		handle("lambda", tonumber(payload))
+	elseif event == "apply" or event == "revert" then
+		handle(event, nil)
+	elseif event == "allow-vertical" then
+		handle("allowVertical", payload == "on" or payload == "true")
+	elseif event == "sample" then
+		for name, O in pairs(outputs) do
+			if O.layout then
+				sampleTask(name)
+			end
+		end
 	elseif event == "lab" then
 		noctalia.togglePanel("mgeldi/pixel-shift:lab")
 	end
