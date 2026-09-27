@@ -5,8 +5,9 @@
 local M = {}
 local running = {}
 
-function M.spawn(name: string, fn: () -> ())
-	table.insert(running, { name = name, co = coroutine.create(fn) })
+-- `onError(err)` hears about a task that fails; without it the error is logged.
+function M.spawn(name: string, fn: () -> (), onError: ((any) -> ())?)
+	table.insert(running, { name = name, co = coroutine.create(fn), onError = onError })
 end
 
 -- Inside a task: start a callback-style operation and wait for its result.
@@ -44,8 +45,12 @@ function M.tick()
 		local t = running[i]
 		local ok, err = coroutine.resume(t.co)
 		if not ok then
-			noctalia.log(`pixel-shift: task {t.name} failed: {tostring(err)}`)
 			table.remove(running, i)
+			if t.onError then
+				t.onError(err)
+			else
+				noctalia.log(`pixel-shift: task {t.name} failed: {tostring(err)}`)
+			end
 		elseif coroutine.status(t.co) == "dead" then
 			table.remove(running, i)
 		end
@@ -59,6 +64,15 @@ end
 function M.running(name: string): boolean
 	for _, t in ipairs(running) do
 		if t.name == name then
+			return true
+		end
+	end
+	return false
+end
+
+function M.runningPrefix(prefix: string): boolean
+	for _, t in ipairs(running) do
+		if string.sub(t.name, 1, #prefix) == prefix then
 			return true
 		end
 	end

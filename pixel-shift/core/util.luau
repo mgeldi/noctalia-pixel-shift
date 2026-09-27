@@ -49,12 +49,6 @@ function M.fingerprint(v): string
 	return M.fnv1a(M.stableEncode(v))
 end
 
-local counter = 0
-function M.randomId(entropy: string): string
-	counter += 1
-	return M.fnv1a(entropy .. "|" .. tostring(counter) .. "|" .. tostring(os.clock()))
-end
-
 -- Output (logical px) + bar settings -> grim geometry and orientation.
 -- The capture covers the bar plus `contextPx` physical px on its inner side.
 function M.captureGeometry(out, bar, contextPx: number?)
@@ -119,12 +113,17 @@ function M.displacements(layout, offsets)
 	return out
 end
 
+local function tomlString(s: string): string
+	local escaped = string.gsub(string.gsub(s, "\\", "\\\\"), '"', '\\"')
+	return '"' .. escaped .. '"'
+end
+
 function M.verticalToml(barName: string, margin: number, thickness: number): string
 	return table.concat({
 		"# Written by the Pixel Shift plugin (mgeldi/pixel-shift) while vertical shift is on.",
 		"# It moves the bar content by a pixel or two; the plugin removes this file when",
 		"# vertical shift is turned off. Safe to delete.",
-		string.format("[bar.%s]", barName),
+		"[bar." .. tomlString(barName) .. "]",
 		string.format("margin_edge = %d", margin),
 		string.format("thickness = %d", thickness),
 		"",

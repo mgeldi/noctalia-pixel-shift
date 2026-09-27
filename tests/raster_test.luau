@@ -49,12 +49,4 @@ t.test("bmp: header, padding, bottom-up BGR", function()
 	t.eq(string.byte(s, 63), 30)
 end)
 
-t.test("ppm: blank fills a region from its left edge colour", function()
-	local img = ppm.new(4, 1)
-	ppm.set(img, 0, 0, 9, 9, 9); ppm.set(img, 1, 0, 200, 200, 200); ppm.set(img, 2, 0, 200, 200, 200)
-	ppm.blank(img, 1, 3, 0, 1)
-	local r = ppm.get(img, 2, 0)
-	t.eq(r, 9)
-end)
-
 return {}

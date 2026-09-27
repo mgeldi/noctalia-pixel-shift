@@ -13,6 +13,7 @@ local scanstore = require("./core/scanstore.luau")
 local exposure = require("./core/exposure.luau")
 local optimize = require("./core/optimize.luau")
 local schedule = require("./core/schedule.luau")
+local decide = require("./core/decide.luau")
 local tasks = require("./runtime/tasks.luau")
 local capture = require("./runtime/capture.luau")
 local store = require("./runtime/store.luau")
@@ -381,7 +382,6 @@ local STALE = 120 -- s without a hello before a spacer is dropped
 local MIN_SAMPLES = 6 -- exposure samples before they replace the scan
 local OPT_SLICE_MS = 6
 local SLICE_MS = 8 -- Noctalia stops a callback after ~25 ms of CPU
-local RETRY_S = 600
 
 -- persisted preferences and per-output records -------------------------------
 local saved = store.readJson("state.json") or {}
@@ -410,8 +410,8 @@ local themeHex = nil
 local optimizer = nil -- {name, opt, started, allowVertical}
 local spacerChangedAt = os.time()
 local fingerprintDue = true
-local lastFingerprint, lastSlow, lastVertical = 0, 0, -1
-local verticalCheckAt = nil
+local lastFingerprint, lastSlow, lastVertical, lastDrift = 0, 0, -1, 0
+local verticalCheck = nil -- {at, v, retried}: confirm that an applied override took effect
 local errors = {}
 local lastCmd = nil
 
@@ -444,8 +444,6 @@ end
 local function setStatus(st)
 	status = st
 	labDirty = true
-	dataDirty = true
-
 	dataDirty = true
 end
 
@@ -480,8 +478,10 @@ local function barInfo()
 	local prefix = "bar." .. name .. "."
 	local thickness = noctalia.getSetting(prefix .. "thickness") or 34
 	local margin = noctalia.getSetting(prefix .. "margin_edge") or 0
+	-- with the override on (or just changed, before Noctalia reloaded) the
+	-- config reports the shifted values; the bar's own ones are in the base
 	local base = saved.verticalBase
-	if base and vertical.active() then
+	if base and (vertical.active() or not vertical.settled()) then
 		thickness, margin = base.thickness, base.margin
 	end
 	local barScale = noctalia.getSetting(prefix .. "scale") or 1
@@ -516,6 +516,7 @@ end
 
 local function fingerprintFor(name: string, bar, out): string
 	return util.fingerprint({
+		format = decide.LAYOUT_FORMAT,
 		geo = util.captureGeometry(out, bar).geometry,
 		scale = out.scale,
 		pos = bar.position,
@@ -545,8 +546,10 @@ local function newOutput(name: string)
 		needsScan = false,
 		needsOptimize = false,
 		retryAt = 0,
+		failures = 0, -- failed or rejected scans in a row, for the retry backoff
 		lastSample = os.time(),
 		mismatches = 0,
+		mismatchScan = false, -- the pending scan came from mismatched samples
 		lastCapture = nil,
 		variance = nil,
 	}
@@ -587,7 +590,7 @@ local function restore(O, fp: string): boolean
 	end
 	local l = store.readJson(fileName("layout", O.name) .. ".json")
 	local base, bg = scanstore.decode(store.read(fileName("scan", O.name) .. ".bin"))
-	if type(l) ~= "table" or type(l.groups) ~= "table" or not base or base.w ~= l.w or base.h ~= l.h then
+	if not decide.validLayout(l, base) then
 		return false
 	end
 	O.layout, O.base, O.bg, O.baseL = l, base, bg, image.luma(base)
@@ -613,7 +616,7 @@ end
 local function applyStrategy(name: string, strategy, record: boolean?)
 	local meta = saved.outputs[name] or {}
 	saved.outputs[name] = meta
-	if record ~= false and meta.strategy then
+	if record ~= false and meta.strategy and not decide.sameStrategy(meta.strategy, strategy) then
 		meta.history = meta.history or {}
 		table.insert(meta.history, 1, meta.strategy)
 		while #meta.history > 3 do
@@ -628,6 +631,12 @@ end
 
 local function allowVerticalNow(): boolean
 	return saved.allowVertical and saved.verticalBase ~= nil and not errors.vertical
+end
+
+-- Vertical shift was just allowed and the bar's own values are not read
+-- yet: an optimisation now would leave vertical out.
+local function verticalPending(): boolean
+	return saved.allowVertical and saved.verticalBase == nil and not errors.vertical
 end
 
 local function previewFromLambda(name: string)
@@ -695,37 +704,67 @@ local function acked(ids): boolean
 	return true
 end
 
-local function playVertical(now: number)
-	if not allowVerticalNow() or saved.paused then
-		if vertical.active() then
-			vertical.clear()
-		end
-		lastVertical = 0
+-- The bar's own margin and thickness, kept current while no override is in
+-- effect: the user may change the bar at any time.
+local function refreshVerticalBase()
+	if not saved.allowVertical then
 		return
 	end
+	local fresh = decide.verticalBase(saved.verticalBase, barInfo(), vertical.active(), vertical.settled())
+	if fresh ~= saved.verticalBase then
+		saved.verticalBase = fresh
+		persist()
+	end
+end
+
+local function playVertical(now: number)
+	refreshVerticalBase()
 	local V = 0
 	for name in pairs(outputs) do
 		V = math.max(V, activeStrategy(name).vertical or 0)
 	end
-	local v = schedule.vertical(V, now)
-	-- once a minute, also repair a file that no longer matches the schedule
-	-- (deleted by the user, or left over from an older run)
-	local drifted = now % 60 == 0 and (vertical.active() ~= (v > 0))
-	if v ~= lastVertical or drifted then
-		lastVertical = v
-		vertical.apply(saved.verticalBase, v)
-		verticalCheckAt = if v > 0 then now + 5 else nil
-	elseif verticalCheckAt and now >= verticalCheckAt then
-		verticalCheckAt = nil
-		if not vertical.effective(saved.verticalBase, v) then
-			errors.vertical = true
+	local driftDue = now - lastDrift >= 60
+	if driftDue then
+		lastDrift = now
+	end
+	local action, last = decide.verticalAction({
+		scanning = tasks.runningPrefix("scan:"),
+		allowed = allowVerticalNow(),
+		paused = saved.paused,
+		v = schedule.vertical(V, now),
+		last = lastVertical,
+		fileActive = vertical.active(),
+		driftDue = driftDue,
+	})
+	lastVertical = last
+	if action == "hold" or action == "clear" then
+		verticalCheck = nil
+		if action == "clear" then
 			vertical.clear()
-			for _, O in pairs(outputs) do
-				O.needsOptimize = true
-			end
-			labDirty = true
-			dataDirty = true
 		end
+	elseif action == "apply" then
+		vertical.apply(saved.verticalBase, last)
+		verticalCheck = if last > 0 then { at = now + 5, v = last } else nil
+	elseif verticalCheck and now >= verticalCheck.at then
+		local check = verticalCheck
+		verticalCheck = nil
+		if vertical.effective(saved.verticalBase, check.v) then
+			return
+		end
+		if not check.retried then
+			vertical.reload() -- the new file was not picked up: ask once
+			verticalCheck = { at = now + 5, v = check.v, retried = true }
+			return
+		end
+		-- a GUI setting for margin or thickness takes precedence: give up
+		errors.vertical = true
+		vertical.clear()
+		lastVertical = 0
+		for _, O in pairs(outputs) do
+			O.needsOptimize = true
+		end
+		labDirty = true
+		dataDirty = true
 	end
 end
 
@@ -734,52 +773,81 @@ local function fail(name: string, message: string?)
 	local O = outputs[name]
 	forced = nil
 	publishWidths(true)
-	if O then
-		O.needsScan = false
-		O.retryAt = os.time() + RETRY_S
-	end
 	errors.scan = message or "capture failed"
-	noctalia.log("pixel-shift: scan failed on " .. name .. ": " .. tostring(message))
+	local retry = ""
+	if O then
+		O.failures += 1
+		local wait = decide.backoff(O.failures)
+		O.needsScan = true
+		O.retryAt = os.time() + wait
+		retry = `; next try in {wait} s`
+	end
+	noctalia.log(`pixel-shift: scan failed on {name}: {errors.scan}{retry}`)
 	setStatus({ kind = "error", message = errors.scan })
+end
+
+local function locked(): boolean
+	local sid = noctalia.getenv("XDG_SESSION_ID")
+	if not sid or sid == "" or not noctalia.commandExists("loginctl") then
+		return false
+	end
+	local res = tasks.await(function(done)
+		if not noctalia.runAsync({ "loginctl", "show-session", sid, "-p", "LockedHint", "--value" }, done, 3000) then
+			done(nil)
+		end
+	end)
+	return res ~= nil and res.exitCode == 0 and string.find(res.stdout, "yes", 1, true) ~= nil
 end
 
 local function scanTask(name: string)
 	tasks.spawn("scan:" .. name, function()
 		local O = outputs[name]
-		local out, bar = outputInfo(name), barInfo()
+		local out = outputInfo(name)
 		local ids = spacersOn(name)
-		if not O or not out or not bar.enabled or #ids == 0 then
+		if not O or not out or #ids == 0 then
 			if O then
 				O.needsScan = false
 			end
 			return
 		end
+		if locked() then
+			O.failures += 1
+			O.retryAt = os.time() + decide.backoff(O.failures)
+			noctalia.log(`pixel-shift: session locked, measuring {name} later`)
+			return
+		end
 		setStatus({ kind = "scanning", output = name })
 		noctalia.log("pixel-shift: measuring " .. name)
-		local verticalWas = vertical.active()
-		if verticalWas then
-			vertical.clear()
-			tasks.sleep(500)
+		-- measure the bar at its own size: without the vertical override, after
+		-- Noctalia reloaded (the vertical player holds while a scan runs)
+		vertical.clear()
+		tasks.waitFor(vertical.settled, vertical.SETTLE_MS + 1000)
+		local bar = barInfo()
+		if not bar.enabled then
+			O.needsScan = false
+			setStatus({ kind = "idle" })
+			return
 		end
 		local geom = util.captureGeometry(out, bar)
 		local zero = {}
 		for _, id in ipairs(ids) do
 			zero[id] = 0
 		end
-		local function settle(map)
+		-- set the spacer widths, wait until every spacer drew them, capture
+		local function shot(map)
 			forced = map
 			publishWidths(true)
-			tasks.waitFor(function()
+			local drawn = tasks.waitFor(function()
 				return acked(ids)
 			end, 2000)
+			if not drawn then
+				return nil, "the spacers did not respond"
+			end
 			tasks.sleep(SETTLE_MS)
-		end
-		local function grab()
 			return capture.grab(geom.geometry, geom.transpose)
 		end
 
-		settle(zero)
-		local baseA, err = grab()
+		local baseA, err = shot(zero)
 		if not baseA then
 			return fail(name, err)
 		end
@@ -787,8 +855,7 @@ local function scanTask(name: string)
 		for _, id in ipairs(ids) do
 			local m = table.clone(zero)
 			m[id] = PROBE
-			settle(m)
-			local img, perr = grab()
+			local img, perr = shot(m)
 			if not img then
 				return fail(name, perr)
 			end
@@ -798,18 +865,16 @@ local function scanTask(name: string)
 		for _, id in ipairs(ids) do
 			all[id] = PROBE
 		end
-		settle(all)
-		local allImg = grab()
-		settle(zero)
-		local baseB = grab()
+		local allImg, aerr = shot(all)
+		if not allImg then
+			return fail(name, aerr)
+		end
+		local baseB, berr = shot(zero)
+		if not baseB then
+			return fail(name, berr)
+		end
 		forced = nil
 		publishWidths(true)
-		if verticalWas then
-			lastVertical = -1
-		end
-		if not allImg or not baseB then
-			return fail(name, "capture failed")
-		end
 
 		-- noctalia.outputs() reports the integer buffer scale (2 for 1.5), so the
 		-- physical scale comes from the capture itself.
@@ -835,11 +900,22 @@ local function scanTask(name: string)
 		local bg = layoutMod.background(lin, l, diff)
 		local verr = layoutMod.verify(l, baseL, image.luma(bg), image.luma(wear.linearFromRgb8(allImg)))
 
+		-- nothing moved: a lock screen or fullscreen app covers the bar, or the
+		-- spacers sit where they cannot move anything
+		local outcome = decide.scanOutcome(l, decide.anyMoving(O.layout), O.failures + 1)
+		if not outcome.accept then
+			O.failures += 1
+			O.retryAt = os.time() + outcome.retryIn
+			noctalia.log(`pixel-shift: nothing moved while measuring {name} (bar covered?); keeping the previous measurement, next try in {outcome.retryIn} s`)
+			setStatus({ kind = "idle" })
+			return
+		end
+		l.format = decide.LAYOUT_FORMAT
 		O.layout, O.base, O.bg, O.baseL = l, lin, bg, baseL
 		O.scanLayers = {}
 		O.approximate = verr > layoutMod.VERIFY_LIMIT
 		O.lastCapture = baseA
-		O.info = { width = out.width, thickness = bar.thickness, scale = scale }
+		O.info = { width = out.width, thickness = bar.thickness, scale = scale, bright = exposure.brightFraction(baseA) }
 		local fp = fingerprintFor(name, bar, out)
 		local meta = saved.outputs[name] or {}
 		saved.outputs[name] = meta
@@ -858,24 +934,24 @@ local function scanTask(name: string)
 		persist()
 		errors.scan = nil
 		rebuildLayers(O)
-		O.needsScan = false
-		O.needsOptimize = O.result == nil
+		O.mismatches, O.mismatchRef, O.mismatchScan = 0, nil, false
+		O.needsOptimize = outcome.optimize -- after every scan where something moves
+		if outcome.retryIn then
+			O.failures += 1
+			O.needsScan, O.retryAt = true, os.time() + outcome.retryIn
+		else
+			O.failures = 0
+			O.needsScan = false
+		end
 		noctalia.log(`pixel-shift: measured {name}: {#l.groups} groups, verify error {string.format("%.2f", verr)}`)
 		setStatus({ kind = "idle" })
+	end, function(err)
+		fail(name, "measuring failed: " .. tostring(err))
 	end)
 end
 
-local function locked(): boolean
-	local sid = noctalia.getenv("XDG_SESSION_ID")
-	if not sid or sid == "" or not noctalia.commandExists("loginctl") then
-		return false
-	end
-	local res = tasks.await(function(done)
-		if not noctalia.runAsync({ "loginctl", "show-session", sid, "-p", "LockedHint", "--value" }, done, 3000) then
-			done(nil)
-		end
-	end)
-	return res ~= nil and res.exitCode == 0 and string.find(res.stdout, "yes", 1, true) ~= nil
+local function saveExposure(O)
+	store.write(fileName("exposure", O.name) .. ".bin", exposure.serialize(O.acc))
 end
 
 local function sampleTask(name: string)
@@ -894,32 +970,42 @@ local function sampleTask(name: string)
 		end
 		local geom = util.captureGeometry(out, bar)
 		local img = capture.grab(geom.geometry, geom.transpose)
-		if not img or exposure.isBlank(img) then
+		if not img or exposure.isBlank(img, O.info and O.info.bright) then
 			noctalia.log("pixel-shift: sample skipped on " .. name .. " (no capture or blank output)")
 			return
 		end
 		if img.w ~= O.layout.w or img.h ~= O.layout.h then
 			noctalia.log("pixel-shift: sample size changed on " .. name .. ", measuring again")
-			O.needsScan = true
+			O.needsScan, O.retryAt = true, 0
 			return
 		end
 		local now = os.time()
 		local offs = if saved.paused then {} else schedule.offsets(activeStrategy(name), spacersOn(name), now, setting("step_minutes", 4))
 		local vRows = if vertical.active() and lastVertical > 0 then math.floor(lastVertical * O.layout.scale + 0.5) else 0
 		local back = exposure.unshift(wear.linearFromRgb8(img), O.layout, util.displacements(O.layout, offs), vRows)
-		if not exposure.matchesBaseline(image.luma(back), O.baseL, O.layout) then
-			noctalia.log("pixel-shift: sample on " .. name .. " does not match the measured bar (locked screen, fullscreen app or new theme?)")
-			O.mismatches += 1
-			if O.mismatches >= 3 then
-				O.mismatches = 0
-				O.needsScan = true
+		local backL = image.luma(back)
+		if not exposure.matchesBaseline(backL, O.baseL, O.layout) then
+			-- something covers the bar, or it looks different now; measure again
+			-- only when several samples in a row show the same picture
+			local agrees = O.mismatchRef ~= nil and exposure.matchesBaseline(backL, O.mismatchRef, O.layout)
+			local n, rescan = decide.mismatch(O.mismatches, agrees)
+			O.mismatches = n
+			O.mismatchRef = if rescan then nil elseif agrees then O.mismatchRef else backL
+			if rescan and not O.needsScan then
+				O.needsScan, O.retryAt, O.mismatchScan = true, 0, true
 			end
+			noctalia.log(`pixel-shift: sample on {name} does not match the measured bar{if rescan then ", measuring again" else ""}`)
 			return
 		end
-		O.mismatches = 0
+		if O.mismatchScan then
+			O.needsScan, O.mismatchScan, O.failures = false, false, 0 -- the bar is back as measured
+		end
+		O.mismatches, O.mismatchRef = 0, nil
 		O.lastCapture = img
 		exposure.add(O.acc, back, now)
-		store.write(fileName("exposure", name) .. ".bin", exposure.serialize(O.acc))
+		if decide.persistExposure(O.acc.n) then
+			saveExposure(O)
+		end
 		if O.acc.n == MIN_SAMPLES or (O.acc.n > MIN_SAMPLES and O.acc.n % 12 == 0) then
 			rebuildLayers(O)
 		end
@@ -934,14 +1020,18 @@ local function startOptimize(name: string)
 	if not O or not O.layers then
 		return
 	end
-	local maxV = if allowVerticalNow() then 2 else 0
-	optimizer = {
-		name = name,
-		started = os.clock(),
-		allowVertical = maxV > 0,
-		opt = optimize.new({ layers = O.layers, layout = O.layout, rref = O.rref, maxShift = setting("max_shift", 16), maxV = maxV }),
-	}
 	O.needsOptimize = false
+	if not decide.anyMoving(O.layout) then
+		return -- nothing to optimise; the lab explains why
+	end
+	local maxV = if allowVerticalNow() then 2 else 0
+	local ok, opt = pcall(optimize.new, { layers = O.layers, layout = O.layout, rref = O.rref, maxShift = setting("max_shift", 16), maxV = maxV })
+	if not ok then
+		noctalia.log(`pixel-shift: optimiser could not start on {name}: {tostring(opt)}`)
+		setStatus({ kind = "error", message = tostring(opt) })
+		return
+	end
+	optimizer = { name = name, started = os.clock(), allowVertical = maxV > 0, opt = opt }
 	setStatus({ kind = "optimizing", output = name, progress = 0 })
 end
 
@@ -969,10 +1059,11 @@ local function finishOptimize()
 	local meta = saved.outputs[run.name] or {}
 	saved.outputs[run.name] = meta
 	meta.result = O.result
-	if saved.auto then
-		local e = optimize.pick(O.result.entries, optimize.lambdaFromSlider(saved.lambdaT), run.allowVertical)
+	if saved.auto and decide.autoApply(O.layout) then
+		local level = decide.autoLevel(meta.strategy, saved.lambdaT)
+		local e = optimize.pick(O.result.entries, optimize.lambdaFromSlider(level), run.allowVertical)
 		if e then
-			applyStrategy(run.name, { ranges = e.ranges, vertical = e.V })
+			applyStrategy(run.name, { ranges = e.ranges, vertical = e.V, lambdaT = level })
 		end
 	end
 	O.preview = nil
@@ -1001,11 +1092,14 @@ local function refreshOutputs()
 				O.fp = fp
 				tasks.spawn("restore:" .. name, function()
 					if not restore(O, fp) then
-						O.fp = nil
-						O.needsScan = true
-						O.retryAt = 0
-					elseif O.result == nil then
-						O.needsOptimize = true
+						-- a bar not measured yet: now, and with a fresh backoff
+						O.needsScan, O.retryAt, O.failures, O.mismatchScan = true, 0, 0, false
+					elseif not decide.anyMoving(O.layout) then
+						O.needsScan, O.failures = true, 1
+						O.retryAt = os.time() + decide.backoff(1)
+					else
+						O.needsScan, O.failures = false, 0
+						O.needsOptimize = O.result == nil
 					end
 				end)
 			end
@@ -1014,6 +1108,16 @@ local function refreshOutputs()
 end
 
 -- lab -----------------------------------------------------------------------------
+local SPACER_TYPE = "mgeldi/pixel-shift:spacer"
+
+-- Spacers configured where they cannot move anything, for the lab's advice.
+local function misplacedSpacers()
+	local bar = barInfo()
+	return decide.placement({ start = bar.layout[1], center = bar.layout[2], ["end"] = bar.layout[3] }, function(n)
+		return n == SPACER_TYPE or noctalia.getSetting(`widget.{n}.type`) == SPACER_TYPE
+	end)
+end
+
 -- An anchored centre widget pins the whole centre section, so the centre
 -- spacers cannot move it. Returns that widget's name for the lab's hint.
 local function anchoredCenterWidget(): string?
@@ -1061,6 +1165,7 @@ local function renderLab()
 		grim = capture.available(),
 		spacerCount = count,
 		anchor = anchoredCenterWidget(),
+		placement = misplacedSpacers(),
 	}
 	local O = ui.output and outputs[ui.output]
 	if not dataDirty and lastData then
@@ -1094,16 +1199,14 @@ end
 
 local function setAllowVertical(on: boolean)
 	errors.vertical = nil
+	saved.allowVertical = on
 	if on then
-		if not saved.verticalBase then
-			local bar = barInfo()
-			saved.verticalBase = { bar = bar.name, margin = bar.margin, thickness = bar.rawThickness }
-		end
-		saved.allowVertical = true
+		refreshVerticalBase() -- now if the config allows, else within a few seconds
 	else
-		saved.allowVertical = false
+		saved.verticalBase = nil -- read again next time: the bar may change meanwhile
 		vertical.clear()
 		lastVertical = 0
+		verticalCheck = nil
 	end
 	persist()
 	for _, O in pairs(outputs) do
@@ -1121,6 +1224,9 @@ local function setPaused(p: boolean)
 end
 
 local function handle(cmd: string, arg)
+	if cmd ~= "output" then
+		ui.output = decide.pickOutput(ui.output, outputs) -- scripts may act before the lab opened
+	end
 	local name = ui.output
 	local O = name and outputs[name]
 	if cmd == "view" or cmd == "mode" then
@@ -1131,7 +1237,7 @@ local function handle(cmd: string, arg)
 		ui.output, ui.hotspot = arg, 1
 	elseif cmd == "rescan" then
 		if O then
-			O.needsScan, O.retryAt = true, 0
+			O.needsScan, O.retryAt, O.failures, O.mismatchScan = true, 0, 0, false
 		end
 	elseif cmd == "optimize" then
 		local target = (type(arg) == "string" and outputs[arg]) or O
@@ -1204,8 +1310,6 @@ local function handle(cmd: string, arg)
 	end
 	labDirty = true
 	dataDirty = true
-
-	dataDirty = true
 end
 
 -- wiring ----------------------------------------------------------------------------
@@ -1260,15 +1364,8 @@ function onIpc(event, payload)
 		handle(event, payload)
 	elseif event == "view" or event == "mode" or event == "output" or event == "hotspot" then
 		handle(event, payload) -- drive the lab from scripts
-		dataDirty = true
 	elseif event == "lambda" then
-		-- protection level 0 (calm) .. 1 (max); previews, "apply" makes it active
-		if not ui.output then
-			for name in pairs(outputs) do
-				ui.output = ui.output or name
-			end
-		end
-		handle("lambda", tonumber(payload))
+		handle("lambda", tonumber(payload)) -- protection level 0 (calm) .. 1 (max); "apply" makes it active
 	elseif event == "apply" or event == "revert" then
 		handle(event, nil)
 	elseif event == "allow-vertical" then
@@ -1327,11 +1424,14 @@ function update()
 			spacerChangedAt, fingerprintDue = now, true
 			publishKnown()
 		end
-		if now - spacerChangedAt >= 3 and (fingerprintDue or now - lastFingerprint >= 60) then
+		-- right after a vertical step the config still reloads: bar values,
+		-- fingerprints and captures wait until it has settled
+		local settled = vertical.settled()
+		if settled and now - spacerChangedAt >= 3 and (fingerprintDue or now - lastFingerprint >= 60) then
 			lastFingerprint, fingerprintDue = now, false
 			refreshOutputs()
 		end
-		if not tasks.active() and not optimizer then
+		if settled and not tasks.active() and not optimizer then
 			local today = os.date("%Y-%m-%d", now)
 			if tonumber(os.date("%H", now)) >= 4 and saved.lastNightly ~= today then
 				saved.lastNightly = today
@@ -1350,7 +1450,7 @@ function update()
 						scanTask(name)
 					end
 					break
-				elseif O.needsOptimize and O.layers then
+				elseif O.needsOptimize and O.layers and not verticalPending() then
 					startOptimize(name)
 					break
 				elseif O.layout and now - O.lastSample >= every then

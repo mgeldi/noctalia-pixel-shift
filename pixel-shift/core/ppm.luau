@@ -93,16 +93,4 @@ function M.transpose(img: Rgb8): Rgb8
 	return out
 end
 
--- Fill columns [x0, x1) of rows [y0, y1) with the colour just left of x0
--- (per row). Used to blank window/media titles in public screenshots.
-function M.blank(img: Rgb8, x0: number, x1: number, y0: number, y1: number)
-	for y = y0, y1 - 1 do
-		local sx = math.max(x0 - 1, 0)
-		local r, g, b = M.get(img, sx, y)
-		for x = x0, x1 - 1 do
-			M.set(img, x, y, r, g, b)
-		end
-	end
-end
-
 return M

@@ -51,7 +51,15 @@
     "safe": "safe",
     "risky": "risky",
     "approximate": "The measurement was noisy, so these results are approximate. Check the spacer placement and measure again.",
-    "moves_nothing": "The {slot} spacer moves nothing. Put it before the widgets it should move.",
+    "moves_nothing": {
+      "one": "One spacer moves nothing. Spacers move widgets only from the outer edge of a section: first in the start section, first or last in the center, last in the end section.",
+      "other": "{count} spacers move nothing. Spacers move widgets only from the outer edge of a section: first in the start section, first or last in the center, last in the end section."
+    },
+    "placement": {
+      "start": "Make {widget} the first item of the bar's start section, or it cannot move anything.",
+      "center": "Make {widget} the first or last item of the bar's center section.",
+      "end": "Make {widget} the last item of the bar's end section, or it cannot move anything."
+    },
     "no_hotspots": "Nothing risky left. Nice bar.",
     "strategy": "Strategy",
     "auto": "Auto",

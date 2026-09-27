@@ -13,7 +13,7 @@ local function tmpPath(): string
 	if dir == nil or dir == "" then
 		dir = noctalia.pluginDataDir()
 	end
-	return `{dir}/pixel-shift-{counter}.ppm`
+	return `{dir}/pixel-shift-{noctalia.nowMs()}-{counter}.ppm` -- unique across shell instances
 end
 
 function M.available(): boolean

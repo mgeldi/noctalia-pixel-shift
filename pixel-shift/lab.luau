@@ -198,6 +198,15 @@ local function inspector(d)
 	})
 end
 
+-- Spacers configured where they cannot move anything, named with the fix.
+local function placementNotes(m, width: number)
+	local out = {}
+	for _, p in ipairs(m.placement or {}) do
+		table.insert(out, note(tr("lab.placement." .. p.want, { widget = p.widget }), width, "error"))
+	end
+	return out
+end
+
 -- sidebar: the result and its reasons in one surface -----------------------------
 local function sidebar(m, d)
 	local selected = m.ui.hotspot
@@ -219,8 +228,11 @@ local function sidebar(m, d)
 	if m.anchor then
 		table.insert(items, note(tr("lab.anchored", { widget = m.anchor }), 320, "error"))
 	end
-	for _, slot in ipairs(d.idle) do
-		table.insert(items, note(tr("lab.moves_nothing", { slot = tr("slot." .. slot) }), 320, "error"))
+	for _, n in ipairs(placementNotes(m, 320)) do
+		table.insert(items, n)
+	end
+	if #d.idle > 0 then
+		table.insert(items, note(noctalia.trp("lab.moves_nothing", #d.idle, { count = #d.idle }), 320, "error"))
 	end
 	table.insert(items, ui.separator({ spacing = 2 }))
 	if #d.hotspots == 0 then
@@ -531,7 +543,9 @@ render = function()
 			}))
 			table.insert(children, strategyCard(m, d))
 		elseif not b then
-			table.insert(children, card({ caption(tr("lab.waiting")) }))
+			local items = placementNotes(m, 860)
+			table.insert(items, 1, caption(tr("lab.waiting")))
+			table.insert(children, card(items))
 		end
 	end
 	panel.render(ui.scroll({ flexGrow = 1, gap = REGION }, children))

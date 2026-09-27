@@ -21,8 +21,8 @@ function M.new(w: number, h: number)
 	return acc
 end
 
--- A capture where fewer than 1 % of pixels rise above 12/255: output off.
-function M.isBlank(img): boolean
+-- Fraction of pixels with a channel above 12/255.
+function M.brightFraction(img): number
 	local d = img.data
 	local n = img.w * img.h
 	local bright = 0
@@ -35,25 +35,128 @@ function M.isBlank(img): boolean
 			bright += 1
 		end
 	end
-	return bright < n * 0.01
+	return if n > 0 then bright / n else 0
 end
 
--- Does the capture still show the scanned bar? Mean luma difference over
--- the bar rows. Changing titles move it a little; a lock screen, a
--- fullscreen app or a new wallpaper move it a lot.
-function M.matchesBaseline(capL, baseL, layout, tol: number?): boolean
-	local sum, n = 0, 0
-	for y = layout.barRows[1], layout.barRows[2] - 1 do
+-- A capture with (almost) nothing lit: the output is off or covered by
+-- black. `expected` is the scanned bar's own bright fraction, so a minimal
+-- black bar is not taken for a dark screen.
+function M.isBlank(img, expected: number?): boolean
+	local limit = 0.01
+	if expected then
+		limit = math.min(limit, expected * 0.5)
+	end
+	return M.brightFraction(img) < limit
+end
+
+-- Structure of the bar rows for the match test: each pixel as one of 64
+-- perceptual levels, and each row's dominant level (its background).
+local LEVELS = 64
+local CONTENT = 8 -- levels a pixel must stand out from its row to count as content
+local SAME = 8 -- levels two content pixels may differ and still line up
+local ROWS_MIN = 0.6 -- share of rows whose background must agree
+local SHARED_MIN = 0.3 -- share of content that must line up (Dice, ±1 px)
+
+local function profile(L, y0: number, y1: number)
+	local w, rows = L.w, y1 - y0
+	local lv = buffer.create(w * rows)
+	local modes = table.create(rows, 0)
+	local hist = table.create(LEVELS, 0)
+	for r = 0, rows - 1 do
 		budget.check()
-		for x = 0, baseL.w - 1 do
-			sum += math.abs(image.get(capL, x, y) - image.get(baseL, x, y))
-			n += 1
+		for i = 1, LEVELS do
+			hist[i] = 0
+		end
+		local src = (y0 + r) * w * 4
+		for x = 0, w - 1 do
+			local v = buffer.readf32(L.data, src + x * 4)
+			local l = if v <= 0 then 0 else math.min(LEVELS - 1, math.floor(v ^ (1 / 2.4) * LEVELS))
+			buffer.writeu8(lv, r * w + x, l)
+			hist[l + 1] += 1
+		end
+		local best, mode = -1, 0
+		for i = 1, LEVELS do
+			if hist[i] > best then
+				best, mode = hist[i], i - 1
+			end
+		end
+		modes[r + 1] = mode
+	end
+	return { lv = lv, modes = modes, w = w, rows = rows }
+end
+
+local profiles = setmetatable({}, { __mode = "k" }) -- baseline image -> profile
+
+local function cachedProfile(L, y0: number, y1: number)
+	local hit = profiles[L]
+	if hit and hit.y0 == y0 and hit.y1 == y1 then
+		return hit.p
+	end
+	local p = profile(L, y0, y1)
+	profiles[L] = { y0 = y0, y1 = y1, p = p }
+	return p
+end
+
+-- A content pixel of about level `l` at x-1..x+1 in row `off` of profile p?
+local function near(p, off: number, x: number, l: number, mode: number): boolean
+	for xx = math.max(x - 1, 0), math.min(x + 1, p.w - 1) do
+		local q = buffer.readu8(p.lv, off + xx)
+		if math.abs(q - mode) >= CONTENT and math.abs(q - l) <= SAME then
+			return true
 		end
 	end
-	if n == 0 then
+	return false
+end
+
+-- Does the capture still show the scanned bar? Compared in perceptual levels
+-- over the bar rows: each row's background must agree, and the content that
+-- stands out from it must mostly line up with the scan's. A new window title
+-- changes part of the content; a lock screen or a fullscreen app changes the
+-- background or all of it, however dark it is.
+function M.matchesBaseline(capL, baseL, layout): boolean
+	local y0, y1 = layout.barRows[1], layout.barRows[2]
+	local rows = y1 - y0
+	if rows <= 0 then
 		return true
 	end
-	return sum / n < (tol or 0.06)
+	local b = cachedProfile(baseL, y0, y1)
+	local f = profile(capL, y0, y1)
+	local agree = 0
+	for r = 1, rows do
+		if math.abs(b.modes[r] - f.modes[r]) <= 1 then
+			agree += 1
+		end
+	end
+	if agree < rows * ROWS_MIN then
+		return false
+	end
+	local w = b.w
+	local nb, nf, shared = 0, 0, 0
+	for r = 0, rows - 1 do
+		budget.check()
+		local mB, mF = b.modes[r + 1], f.modes[r + 1]
+		local off = r * w
+		for x = 0, w - 1 do
+			local lb = buffer.readu8(b.lv, off + x)
+			if math.abs(lb - mB) >= CONTENT then
+				nb += 1
+				if near(f, off, x, lb, mF) then
+					shared += 1
+				end
+			end
+			local lf = buffer.readu8(f.lv, off + x)
+			if math.abs(lf - mF) >= CONTENT then
+				nf += 1
+				if near(b, off, x, lf, mB) then
+					shared += 1
+				end
+			end
+		end
+	end
+	if nb + nf < math.max(16, rows * w * 0.001) then
+		return true -- nothing stands out in either: the background decides
+	end
+	return shared / (nb + nf) >= SHARED_MIN
 end
 
 -- Undo the displacement active when the frame was captured: group gi's

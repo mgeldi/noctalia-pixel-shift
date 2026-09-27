@@ -63,7 +63,8 @@ session is locked.
    - **Risk** and **Bar** show the risk map and the bar itself; **No shift** and
      **Strategy** compare the two.
    - The list names each hotspot's cause and what to change, for example a solid fill
-     wider than the shift range.
+     wider than the shift range. It also names spacers that sit where they cannot
+     move anything.
    - **Strategy** shows the risk for every amount of movement. In **Auto** mode Pixel
      Shift picks the point where more movement stops paying off; move the
      **Calm ↔ Max protection** slider and press **Apply** to choose another point.
@@ -117,7 +118,9 @@ minimise that risk for every movement budget. The strategy is played from the wa
 clock: each spacer walks 1 px at a time and spends equal time on every offset.
 Samples captured over the day replace the single snapshot once there are enough of
 them, so changing content like window titles is weighted by how long it is actually
-shown. The risk numbers are relative (100 = a 1 px white line that never moves); the
+shown. Samples that do not show the measured bar, such as a lock screen or a
+fullscreen window, are skipped, and a measurement in which no spacer moves anything
+never replaces one that worked. The risk numbers are relative (100 = a 1 px white line that never moves); the
 plugin makes no lifetime predictions.
 
 **What shifting cannot fix.** A solid fill wider than the shift range keeps a
@@ -135,23 +138,41 @@ gap if you want your old positions back.
 window, keeps its size. Each step reloads the config, which makes the bar blink
 briefly; steps happen every 30 minutes. Turning the option off, pausing, or disabling
 the plugin removes the file. If a GUI setting overrides the bar's margin or thickness,
-the plugin notices and turns vertical shift off again.
+the plugin notices and turns vertical shift off again. Pixel Shift reads your own
+margin and thickness whenever the file is absent, so a change you make to them takes
+effect the next time the offset returns to 0; turning vertical shift off and on again
+picks it up within seconds.
 
-**Files written.** In the plugin data directory: `state.json` (strategies and
-preferences), `layout-<output>.json` and `scan-<output>.bin` (the measured layout and
-background), `exposure-<output>.bin` (running averages of the captured bar, no
-individual screenshots), and `render/*.bmp` (lab images). Captures are written briefly
-to `$XDG_RUNTIME_DIR/pixel-shift-*.ppm` and deleted after reading. With vertical shift
-on: `zz-pixel-shift.toml` in the config directory.
+**Files written.** In the plugin data directory (usually
+`~/.local/state/noctalia/plugins/data/mgeldi/pixel-shift/`):
+
+- `state.json`: strategies, preferences and what was measured per output.
+- `layout-<output>.json`: the measured groups and how far each spacer moves them.
+- `scan-<output>.bin`: the full-resolution capture of the bar strip from the last
+  measurement, so whatever the bar showed then (window and media titles too), and the
+  static background derived from it. Each measurement replaces it.
+- `exposure-<output>.bin`: per-pixel running sums of the accepted samples. It keeps no
+  individual frames, but while it holds a single sample it equals that capture.
+  Written every 6 samples.
+- `render/*.bmp`: the lab's images, including the **Bar** view, which shows the latest
+  capture. The last two per image are kept, and all are removed when the plugin starts.
+
+Captures are written briefly to `$XDG_RUNTIME_DIR/pixel-shift-*.ppm` and deleted after
+reading. With vertical shift on: `zz-pixel-shift.toml` in the Noctalia config
+directory (written as `zz-pixel-shift.toml.tmp` and renamed into place).
 
 **Processes.** `grim` (during a measurement and every `sample_minutes`), `loginctl
-show-session` (before each sample, when available), `noctalia msg config-reload`
-(vertical steps only), `noctalia msg settings-open bar` (the lab's onboarding button).
+show-session` (before each measurement and sample, when available), `noctalia msg
+config-reload` (after the vertical override is removed, and once more if Noctalia did
+not pick up a new override by itself), `noctalia msg settings-open bar` (the lab's
+onboarding button).
 On Noctalia versions without `noctalia.getColor`, opening the lab runs `noctalia msg
 color-scheme-get` and `noctalia theme <wallpaper>` to find the theme colour.
 
-**Privacy.** Only the bar strip and 8 px below it are captured. Everything stays on
-your machine; the plugin makes no network requests.
+**Privacy.** Only the bar strip and 8 px below it are captured. The capture from the
+last measurement stays in the data directory (see above) and can show window or media
+titles; removing the plugin's data directory deletes it. Nothing leaves your machine;
+the plugin makes no network requests.
 
 **Performance.** Measuring, optimising and rendering run in small slices between
 frames, so the shell stays responsive. A search takes a few seconds of CPU per output,
