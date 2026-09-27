@@ -4,7 +4,7 @@ local path = nil
 
 local function render()
 	panel.render(ui.column({ gap = 8 }, {
-		ui.label({ text = "Pixel Shift spike" }),
+		ui.label({ text = "Pixel Shift spike " .. noctalia.json.encode(noctalia.state.get("spike:table")) }),
 		ui.image({ path = path, width = 400, height = 60, fit = "stretch" }),
 	}))
 end
