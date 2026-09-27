@@ -1111,8 +1111,7 @@ end
 local SPACER_TYPE = "mgeldi/pixel-shift:spacer"
 
 -- Spacers configured where they cannot move anything, for the lab's advice.
-local function misplacedSpacers()
-	local bar = barInfo()
+local function misplacedSpacers(bar)
 	return decide.placement({ start = bar.layout[1], center = bar.layout[2], ["end"] = bar.layout[3] }, function(n)
 		return n == SPACER_TYPE or noctalia.getSetting(`widget.{n}.type`) == SPACER_TYPE
 	end)
@@ -1120,9 +1119,8 @@ end
 
 -- An anchored centre widget pins the whole centre section, so the centre
 -- spacers cannot move it. Returns that widget's name for the lab's hint.
-local function anchoredCenterWidget(): string?
-	local bar = barInfo()
-	local center = noctalia.getSetting(`bar.{bar.name}.center`)
+local function anchoredCenterWidget(bar): string?
+	local center = bar.layout[2]
 	if type(center) ~= "table" then
 		return nil
 	end
@@ -1132,6 +1130,20 @@ local function anchoredCenterWidget(): string?
 		end
 	end
 	return nil
+end
+
+-- The lab's advice about the bar config. Noctalia logs a warning for every
+-- lookup of a widget key that is not set, so this is read again only when the
+-- bar's sections change, or after a minute, never on every lab render.
+local barAdviceCache = { key = nil, at = 0, anchor = nil, placement = {} }
+local function barAdvice()
+	local bar = barInfo()
+	local key = util.stableEncode({ bar.name, bar.layout[1], bar.layout[2], bar.layout[3] })
+	local now = os.time()
+	if key ~= barAdviceCache.key or now - barAdviceCache.at >= 60 then
+		barAdviceCache = { key = key, at = now, anchor = anchoredCenterWidget(bar), placement = misplacedSpacers(bar) }
+	end
+	return barAdviceCache
 end
 
 local function renderLab()
@@ -1147,6 +1159,7 @@ local function renderLab()
 	for _ in pairs(spacers) do
 		count += 1
 	end
+	local advice = barAdvice()
 	local st = table.clone(status)
 	if optimizer then
 		st.progress, st.best = optimizer.opt.progress, optimizer.opt.best
@@ -1164,8 +1177,8 @@ local function renderLab()
 		scanError = errors.scan,
 		grim = capture.available(),
 		spacerCount = count,
-		anchor = anchoredCenterWidget(),
-		placement = misplacedSpacers(),
+		anchor = advice.anchor,
+		placement = advice.placement,
 	}
 	local O = ui.output and outputs[ui.output]
 	if not dataDirty and lastData then
