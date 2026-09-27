@@ -81,10 +81,37 @@ M.CACHE_ITEMS = 32
 local function cacheOf(O)
 	local c = O.renderCache
 	if not c or c.layersId ~= O.layersId then
-		c = { layersId = O.layersId, items = {}, order = {} }
+		c = { layersId = O.layersId, items = {}, order = {}, fixed = {} }
 		O.renderCache = c
 	end
 	return c
+end
+
+-- One per layers epoch (percentiles, the bar raster): kept out of the FIFO.
+local function fixed(O, key: string, fn)
+	local c = cacheOf(O)
+	local hit = c.fixed[key]
+	if hit == nil then
+		hit = fn()
+		c.fixed[key] = hit
+	end
+	return hit
+end
+
+local function peek(O, key: string)
+	return cacheOf(O).items[key]
+end
+
+-- Colour ramps are 256 OKLCH conversions each: once per theme colour.
+local ramps = {}
+local function rampsFor(primary: string?)
+	local k = primary or ""
+	local r = ramps[k]
+	if not r then
+		r = { glow = color.glowRamp(primary), risk = color.riskRamp(primary) }
+		ramps[k] = r
+	end
+	return r
 end
 
 local function cached(O, key: string, fn)
@@ -129,30 +156,73 @@ local function strategyKey(strategy): string
 end
 
 local function views(O, ctx, evNone, evStrat)
-	local c = cached(O, "pct", function()
+	local c = fixed(O, "pct", function()
 		local y0, y1 = O.layout.scoreRows[1], O.layout.scoreRows[2]
 		return { eRef = image.percentile(evNone.E, 0.998, y0, y1), rTop = image.percentile(evNone.R, 0.999, y0, y1) }
 	end)
-	local ramp = color.glowRamp(ctx.primary)
+	local r = rampsFor(ctx.primary)
+	local lum = O.baseL or fixed(O, "lum", function()
+		return image.luma(O.base)
+	end)
+	local function paint(name: string, E, R, lum)
+		if name == "risk" then
+			return render.riskView(lum, R, c.rTop, r.risk)
+		end
+		return render.ghostView(E, R, c.eRef, c.rTop, r.glow)
+	end
 	local function view(name: string, ev, key: string)
 		if name == "bar" then
 			return if O.lastCapture
 				then O.lastCapture
-				else cached(O, "bar", function()
+				else fixed(O, "bar", function()
 					return render.fromLinear(O.base)
 				end)
 		end
 		return cached(O, `view|{name}|{key}|{ctx.primary}`, function()
-			if name == "risk" then
-				local lum = cached(O, "lum", function()
-					return image.luma(O.base)
-				end)
-				return render.riskView(lum, ev.R, c.rTop, color.riskRamp(ctx.primary))
-			end
-			return render.ghostView(ev.E, ev.R, c.eRef, c.rTop, ramp)
+			return paint(name, ev.E, ev.R, lum)
 		end)
 	end
-	return view, ramp
+	-- Columns [x0, x1) of a view. Without the full view cached, only that
+	-- stretch is painted (plus 3 px: the glow's bloom reaches that far).
+	local function stretch(name: string, ev, key: string, x0: number, x1: number)
+		local full = if name == "bar" then view("bar") else peek(O, `view|{name}|{key}|{ctx.primary}`)
+		if full then
+			return full, x0
+		end
+		local w = O.layout.w
+		local c0, c1 = math.max(x0 - 3, 0), math.min(x1 + 3, w)
+		return paint(name, image.crop(ev.E, c0, c1), image.crop(ev.R, c0, c1), image.crop(lum, c0, c1)), x0 - c0
+	end
+	return view, r.glow, stretch
+end
+
+local function spotsFor(O, ctx, evStrat, sKey: string)
+	return cached(O, `spots|{sKey}|{ctx.profile}`, function()
+		local list, worst = hotspots.find({
+			R = evStrat.R,
+			dw = O.layers.dw,
+			wWhite = wear.white(wear.profile(ctx.profile)),
+			variance = O.variance,
+			layout = O.layout,
+			rref = O.rref,
+			strategy = ctx.preview,
+		})
+		return { list = list, worst = worst }
+	end)
+end
+
+-- What the lab needs first, computed while it is closed (the engine runs
+-- this in idle time after the data changed): both evaluations, the
+-- percentiles, the hotspots and the default view. Opening it then only
+-- crops and encodes.
+function M.warm(O, ctx)
+	local none = { ranges = {}, vertical = 0 }
+	local evNone = M.evaluate(O, none)
+	local evStrat = M.evaluate(O, ctx.preview)
+	local sKey = strategyKey(ctx.preview)
+	local view = views(O, ctx, evNone, evStrat)
+	spotsFor(O, ctx, evStrat, sKey)
+	view("ghost", evStrat, sKey)
 end
 
 -- Renders every view and mode at the current hotspot ahead of time (the
@@ -177,23 +247,13 @@ function M.build(O, ui, ctx)
 	local evNone = M.evaluate(O, none)
 	local evStrat = M.evaluate(O, ctx.preview)
 	local sKey, nKey = strategyKey(ctx.preview), strategyKey(none)
-	local view, ramp = views(O, ctx, evNone, evStrat)
+	local view, ramp, stretch = views(O, ctx, evNone, evStrat)
 	local glow = hex(ramp[205])
 	local shownKey = if ui.mode == "none" then nKey else sKey
-	local captureKey = if ui.view == "bar" then tostring(O.lastCapture) else ""
+	local seq = tostring(O.captureSeq or 0) -- bumped by the engine with every new capture
+	local captureKey = if ui.view == "bar" then seq else ""
 
-	local found = cached(O, `spots|{sKey}|{ctx.profile}`, function()
-		local list, worst = hotspots.find({
-			R = evStrat.R,
-			dw = O.layers.dw,
-			wWhite = wear.white(wear.profile(ctx.profile)),
-			variance = O.variance,
-			layout = layout,
-			rref = O.rref,
-			strategy = ctx.preview,
-		})
-		return { list = list, worst = worst }
-	end)
+	local found = spotsFor(O, ctx, evStrat, sKey)
 	local spots = found.list
 	local selected = math.clamp(ui.hotspot or 1, 1, math.max(#spots, 1))
 	local sel = spots[selected]
@@ -218,20 +278,21 @@ function M.build(O, ui, ctx)
 		render.frameHalves(left, right, rx0, rx1, layout.w, ramp[230])
 		return { h = left.h, paths = { left = write("overview-l", bmp.encode(left)), right = write("overview-r", bmp.encode(right)) } }
 	end)
-	local inspector = files(O, ctx, `in|{ui.view}|{sKey}|{captureKey}|{ctx.primary}|{rx0}`, function()
-		local fullNone, fullStrat = view(ui.view, evNone, nKey), view(ui.view, evStrat, sKey)
-		return {
-			paths = {
-				none = write("inspect-none", bmp.encode(render.zoom(fullNone, rx0, rx1, iy0, iy1, zoom))),
-				strategy = write("inspect-strategy", bmp.encode(render.zoom(fullStrat, rx0, rx1, iy0, iy1, zoom))),
-			},
-		}
-	end)
-	local legend = files(O, ctx, `legend|{ctx.primary}`, function()
+	-- the two inspector strips are cached apart: a new strategy leaves "no shift" alone
+	local function strip(slot: string, ev, key: string)
+		return files(O, ctx, `{slot}|{ui.view}|{key}|{captureKey}|{ctx.primary}|{rx0}`, function()
+			local img, ox = stretch(ui.view, ev, key, rx0, rx1)
+			return { paths = { path = write(slot, bmp.encode(render.zoom(img, ox, ox + rx1 - rx0, iy0, iy1, zoom))) } }
+		end)
+	end
+	local inspector = {
+		paths = { none = strip("inspect-none", evNone, nKey).paths.path, strategy = strip("inspect-strategy", evStrat, sKey).paths.path },
+	}
+	local legend = files(O, ctx, `legend|{ctx.primary}`, function() -- tiny; evicted and redone rarely
 		return { paths = { legend = write("legend", bmp.encode(render.legend(ramp, 120, 8))) } }
 	end)
 	-- what each hotspot looks like on the bar itself
-	local thumbs = files(O, ctx, `thumbs|{sKey}|{ctx.profile}`, function()
+	local thumbs = files(O, ctx, `thumbs|{sKey}|{ctx.profile}|{seq}`, function()
 		local barView = view("bar")
 		local pad = math.ceil(12 * (layout.scale or 1))
 		local paths, sizes = {}, {}

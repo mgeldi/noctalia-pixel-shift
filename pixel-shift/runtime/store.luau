@@ -2,6 +2,8 @@
 -- Persistence in the plugin data dir: JSON documents and binary blobs,
 -- written atomically (temp file + rename), plus rendered lab images.
 
+local tasks = require("./tasks.luau")
+
 local M = {}
 
 function M.dir(): string?
@@ -21,6 +23,24 @@ function M.read(name: string): string?
 	end
 	local s = noctalia.readFile(p)
 	return s
+end
+
+-- Inside a task: read without holding the shell's thread while the disk
+-- works. Noctalia's async read stops at 4 MB; bigger files are read directly.
+function M.readAsync(name: string): string?
+	local p = path(name)
+	if not p then
+		return nil
+	end
+	local data = tasks.await(function(done)
+		if not noctalia.readFileAsync(p, done) then
+			done(nil)
+		end
+	end)
+	if data == nil then
+		data = noctalia.readFile(p)
+	end
+	return data
 end
 
 function M.write(name: string, data: string): boolean
@@ -55,7 +75,7 @@ end
 
 -- Lab images live in memory-backed $XDG_RUNTIME_DIR when there is one (they
 -- are rewritten often and worthless after a restart), else in the data dir.
-M.KEEP_RENDERS = 16 -- files kept per image slot; the lab caches their paths
+M.KEEP_RENDERS = 8 -- per image slot: the six prepared view/mode pairs and two more
 
 local function renderDir(): string?
 	local run = noctalia.getenv("XDG_RUNTIME_DIR")

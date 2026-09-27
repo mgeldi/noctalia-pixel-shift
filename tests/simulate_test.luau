@@ -79,4 +79,44 @@ t.test("simulate: group + static histograms match the full evaluation", function
 	t.near(risk.percentile(merged, 0.99), risk.percentile(full.hist, 0.99), 0.02 * RREF)
 end)
 
+t.test("simulate: prepared group histograms match groupHist", function()
+	-- a richer fixture: two groups, a centre pair, text-like strokes and a wide block
+	local wbg, dw = image.new(W, H), image.new(W, H)
+	for y = 0, H - 1 do
+		for x = 0, W - 1 do
+			image.set(wbg, x, y, 0.05 + 0.02 * ((x * 7 + y * 3) % 5))
+		end
+	end
+	for y = 4, 15 do
+		for _, x in ipairs({ 30, 31, 36, 42, 43, 50 }) do
+			image.set(dw, x, y, 0.9)
+		end
+		for x = 120, 150 do
+			image.set(dw, x, y, 0.6)
+		end
+	end
+	local layers = { wbg = wbg, dw = dw }
+	local layout = {
+		w = W, h = H, scale = 1, vDir = 1,
+		barRows = { 0, 18 }, scoreRows = { 0, 20 },
+		groups = {
+			{ x0 = 10, x1 = 80, own0 = 0, own1 = 90, factors = { a = 1 } },
+			{ x0 = 100, x1 = 170, own0 = 90, own1 = 200, factors = { l = 0.5, r = -0.5 } },
+		},
+		slots = { a = { moves = true }, l = { moves = true }, r = { moves = true } },
+	}
+	local active = simulate.activeRanges(layers, layout, 18)
+	local worst = 0
+	for gi = 1, 2 do
+		local P = simulate.prepareGroup(layers, layout, gi, active)
+		for _, c in ipairs({ { a = 0, l = 0, r = 0, V = 0 }, { a = 7, l = 4, r = 9, V = 0 }, { a = 16, l = 12, r = 2, V = 1 }, { a = 3, l = 16, r = 16, V = 2 } }) do
+			local ranges = { a = c.a, l = c.l, r = c.r }
+			local ha = simulate.groupHist(layers, layout, gi, ranges, c.V, RREF, active)
+			local hb = simulate.groupHistPrepared(P, layout, gi, ranges, c.V, RREF)
+			worst = math.max(worst, math.abs(risk.percentile(ha, 0.99) - risk.percentile(hb, 0.99)) / RREF * 100)
+		end
+	end
+	t.ok(worst < 0.05, `p99 differs by {worst} score points`)
+end)
+
 return {}

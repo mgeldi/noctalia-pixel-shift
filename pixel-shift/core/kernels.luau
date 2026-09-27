@@ -327,6 +327,26 @@ do
 		end
 	end
 
+	-- r = |e - a| + cw * |e - b| with e = ew + ec, a = aw + ac, b = bw + bc:
+	-- risk.map from its parts (the static window and the moved content)
+	function K.riskCombineParts(ew: buffer, ec: buffer, aw: buffer, ac: buffer, bw: buffer, bc: buffer, r: buffer, n: number, cw: number)
+		local o = 0
+		while o + 4 < n do
+			if o % 65536 == 0 then
+				budget.check()
+			end
+			local e0, e1 = rf(ew, o) + rf(ec, o), rf(ew, o + 4) + rf(ec, o + 4)
+			wf(r, o, math.abs(e0 - (rf(aw, o) + rf(ac, o))) + cw * math.abs(e0 - (rf(bw, o) + rf(bc, o))))
+			wf(r, o + 4, math.abs(e1 - (rf(aw, o + 4) + rf(ac, o + 4))) + cw * math.abs(e1 - (rf(bw, o + 4) + rf(bc, o + 4))))
+			o += 8
+		end
+		while o < n do
+			local e = rf(ew, o) + rf(ec, o)
+			wf(r, o, math.abs(e - (rf(aw, o) + rf(ac, o))) + cw * math.abs(e - (rf(bw, o) + rf(bc, o))))
+			o += 4
+		end
+	end
+
 	-- d[i] += s[i] for i = 1..n (histogram merge; n is a multiple of 8)
 	function K.mergeBins(d, s, n: number)
 		for i = 1, n, 8 do
@@ -362,6 +382,94 @@ do
 		end
 	end
 
+	-- smallest and largest of count f32 values from byte offset o
+	function K.minMax(data: buffer, o: number, count: number): (number, number)
+		local lo, hi = math.huge, -math.huge
+		local stop, k = o + count * 4, 0
+		while o + 12 < stop do
+			k += 1
+			if k % 4096 == 0 then
+				budget.check()
+			end
+			local a, b, c, d = rf(data, o), rf(data, o + 4), rf(data, o + 8), rf(data, o + 12)
+			lo = math.min(lo, a, b, c, d)
+			hi = math.max(hi, a, b, c, d)
+			o += 16
+		end
+		while o < stop do
+			local a = rf(data, o)
+			lo, hi = math.min(lo, a), math.max(hi, a)
+			o += 4
+		end
+		return lo, hi
+	end
+
+	-- like K.histogram, of (v - lo) * scale
+	function K.histogramFrom(bins, data: buffer, o: number, count: number, lo: number, scale: number, top: number)
+		local stop, k = o + count * 4, 0
+		while o + 12 < stop do
+			k += 1
+			if k % 4096 == 0 then
+				budget.check()
+			end
+			local i0 = math.min(math.max(math.floor((rf(data, o) - lo) * scale), 0), top)
+			local i1 = math.min(math.max(math.floor((rf(data, o + 4) - lo) * scale), 0), top)
+			local i2 = math.min(math.max(math.floor((rf(data, o + 8) - lo) * scale), 0), top)
+			local i3 = math.min(math.max(math.floor((rf(data, o + 12) - lo) * scale), 0), top)
+			bins[i0 + 1] += 1
+			bins[i1 + 1] += 1
+			bins[i2 + 1] += 1
+			bins[i3 + 1] += 1
+			o += 16
+		end
+		while o < stop do
+			local i = math.min(math.max(math.floor((rf(data, o) - lo) * scale), 0), top)
+			bins[i + 1] += 1
+			o += 4
+		end
+	end
+
+	-- f32 luma of n RGB8 pixels through a table of f32-rounded linear values,
+	-- exactly as image.luma computes it from wear.linearFromRgb8's planes
+	function K.lumaRgb8(src: buffer, n: number, lut, dst: buffer)
+		local ru = buffer.readu8
+		local i, s, d = 0, 0, 0
+		while i + 1 < n do
+			if i % 4096 == 0 then
+				budget.check()
+			end
+			wf(dst, d, 0.2126 * lut[ru(src, s) + 1] + 0.7152 * lut[ru(src, s + 1) + 1] + 0.0722 * lut[ru(src, s + 2) + 1])
+			wf(dst, d + 4, 0.2126 * lut[ru(src, s + 3) + 1] + 0.7152 * lut[ru(src, s + 4) + 1] + 0.0722 * lut[ru(src, s + 5) + 1])
+			i += 2
+			s += 6
+			d += 8
+		end
+		if i < n then
+			wf(dst, d, 0.2126 * lut[ru(src, s) + 1] + 0.7152 * lut[ru(src, s + 1) + 1] + 0.0722 * lut[ru(src, s + 2) + 1])
+		end
+	end
+
+	-- wear rate per pixel, exactly as wear.pixel computes it: k1 r^n + k2 g^n +
+	-- k3 b^n on channels clamped to 0..1, or with a white subpixel (WOLED)
+	-- taking min(r, g, b) first
+	function K.wearMap(r: buffer, g: buffer, b: buffer, count: number, k1: number, k2: number, k3: number, white: number?, n: number, out: buffer)
+		for o = 0, (count - 1) * 4, 4 do
+			if o % 8192 == 0 then
+				budget.check()
+			end
+			local vr, vg, vb = rf(r, o), rf(g, o), rf(b, o)
+			vr = if vr < 0 then 0 elseif vr > 1 then 1 else vr
+			vg = if vg < 0 then 0 elseif vg > 1 then 1 else vg
+			vb = if vb < 0 then 0 elseif vb > 1 then 1 else vb
+			if white then
+				local m = math.min(vr, vg, vb)
+				wf(out, o, white * m ^ n + k1 * (vr - m) ^ n + k2 * (vg - m) ^ n + k3 * (vb - m) ^ n)
+			else
+				wf(out, o, k1 * vr ^ n + k2 * vg ^ n + k3 * vb ^ n)
+			end
+		end
+	end
+
 	-- Lab images -----------------------------------------------------------
 	local ru8, wu8 = buffer.readu8, buffer.writeu8
 	local floor, clamp, min = math.floor, math.clamp, math.min
@@ -369,15 +477,6 @@ do
 	local function to8(v: number): number
 		v = floor(v + 0.5)
 		return if v < 0 then 0 elseif v > 255 then 255 else v
-	end
-
-	local function srgb(l: number): number
-		if l <= 0 then
-			return 0
-		elseif l >= 1 then
-			return 1
-		end
-		return if l <= 0.0031308 then 12.92 * l else 1.055 * l ^ (1 / 2.4) - 0.055
 	end
 
 	-- 24-bit BMP rows (bottom-up, BGR, each padded to rowSize) from RGB8
@@ -486,11 +585,13 @@ do
 			local u = clamp((tt - 0.16) / (0.55 - 0.16), 0, 1)
 			local a = u * u * (3 - 2 * u)
 			local c = ramp[floor(tt * 255) + 1]
-			local g = rf(base, o) * 255
+			local g = rf(base, o) * 255 * (1 - a)
 			local d = i * 3
-			wu8(dst, d, to8(g * (1 - a) + c[1] * a))
-			wu8(dst, d + 1, to8(g * (1 - a) + c[2] * a))
-			wu8(dst, d + 2, to8(g * (1 - a) + c[3] * a))
+			-- to8() written out: a call per pixel costs a host interrupt check
+			local r, gg, b = floor(g + c[1] * a + 0.5), floor(g + c[2] * a + 0.5), floor(g + c[3] * a + 0.5)
+			wu8(dst, d, if r < 0 then 0 elseif r > 255 then 255 else r)
+			wu8(dst, d + 1, if gg < 0 then 0 elseif gg > 255 then 255 else gg)
+			wu8(dst, d + 2, if b < 0 then 0 elseif b > 255 then 255 else b)
 		end
 	end
 
@@ -503,12 +604,15 @@ do
 			local o = i * 4
 			local tr = clamp(rf(R, o) * inv, 0, 1) ^ 0.7
 			local a = clamp(1.4 * tr, 0, 1)
-			local g = srgb(rf(lum, o)) * 0.2 * 255
+			local l = rf(lum, o) -- srgb() and to8() written out, as in K.glowPixels
+			local sl = if l <= 0 then 0 elseif l >= 1 then 1 elseif l <= 0.0031308 then 12.92 * l else 1.055 * l ^ (1 / 2.4) - 0.055
+			local g = sl * 0.2 * 255 * (1 - a)
 			local c = ramp[floor(tr * 255) + 1]
 			local d = i * 3
-			wu8(dst, d, to8(g * (1 - a) + c[1] * a))
-			wu8(dst, d + 1, to8(g * (1 - a) + c[2] * a))
-			wu8(dst, d + 2, to8(g * (1 - a) + c[3] * a))
+			local r, gg, b = floor(g + c[1] * a + 0.5), floor(g + c[2] * a + 0.5), floor(g + c[3] * a + 0.5)
+			wu8(dst, d, if r < 0 then 0 elseif r > 255 then 255 else r)
+			wu8(dst, d + 1, if gg < 0 then 0 elseif gg > 255 then 255 else gg)
+			wu8(dst, d + 2, if b < 0 then 0 elseif b > 255 then 255 else b)
 		end
 	end
 
@@ -519,9 +623,13 @@ do
 				budget.check()
 			end
 			local o, d = i * 4, i * 3
-			wu8(dst, d, to8(srgb(rf(r, o)) * 255))
-			wu8(dst, d + 1, to8(srgb(rf(g, o)) * 255))
-			wu8(dst, d + 2, to8(srgb(rf(b, o)) * 255))
+			local lr, lg, lb = rf(r, o), rf(g, o), rf(b, o) -- srgb() and to8() written out
+			local vr = floor((if lr <= 0 then 0 elseif lr >= 1 then 1 elseif lr <= 0.0031308 then 12.92 * lr else 1.055 * lr ^ (1 / 2.4) - 0.055) * 255 + 0.5)
+			local vg = floor((if lg <= 0 then 0 elseif lg >= 1 then 1 elseif lg <= 0.0031308 then 12.92 * lg else 1.055 * lg ^ (1 / 2.4) - 0.055) * 255 + 0.5)
+			local vb = floor((if lb <= 0 then 0 elseif lb >= 1 then 1 elseif lb <= 0.0031308 then 12.92 * lb else 1.055 * lb ^ (1 / 2.4) - 0.055) * 255 + 0.5)
+			wu8(dst, d, if vr < 0 then 0 elseif vr > 255 then 255 else vr)
+			wu8(dst, d + 1, if vg < 0 then 0 elseif vg > 255 then 255 else vg)
+			wu8(dst, d + 2, if vb < 0 then 0 elseif vb > 255 then 255 else vb)
 		end
 	end
 end

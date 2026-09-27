@@ -168,4 +168,115 @@ t.test("renderk: risk view and linear-to-sRGB match the reference", function()
 	end
 end)
 
+t.test("renderk: shiftColumns matches the clamped per-pixel reference", function()
+	local img = randF(23, 3, 99)
+	for _, case in ipairs({ { 0, 23, 5 }, { 0, 23, -5 }, { 4, 17, 3 }, { 4, 17, -9 }, { 10, 12, 30 }, { 0, 23, -40 }, { 3, 9, 0 } }) do
+		local x0, x1, dx = case[1], case[2], case[3]
+		local out = image.shiftColumns(img, x0, x1, dx)
+		for y = 0, img.h - 1 do
+			for x = 0, img.w - 1 do
+				local want = image.get(img, x, y)
+				if x >= x0 and x < x1 then
+					want = image.get(img, math.clamp(x + dx, 0, img.w - 1), y)
+				end
+				if image.get(out, x, y) ~= want then
+					error(`shiftColumns {x0},{x1},{dx}: {x},{y} differs`)
+				end
+			end
+		end
+	end
+end)
+
+t.test("renderk: luma straight from 8-bit captures is bit-identical", function()
+	local wear = require("../pixel-shift/core/wear")
+	for _, sz in ipairs(SIZES) do
+		local img = randRgb(sz[1], sz[2], 41 + sz[1])
+		local a = image.luma(wear.linearFromRgb8(img))
+		local b = wear.lumaFromRgb8(img)
+		for i = 0, a.w * a.h - 1 do
+			if buffer.readf32(a.data, i * 4) ~= buffer.readf32(b.data, i * 4) then
+				error(`luma {sz[1]}x{sz[2]}: pixel {i} differs`)
+			end
+		end
+	end
+end)
+
+t.test("renderk: percentile matches the two-pass reference", function()
+	for _, sz in ipairs({ { 7, 5 }, { 33, 6 }, { 64, 9 } }) do
+		local img = randF(sz[1], sz[2], 7 * sz[1], 3)
+		for _, q in ipairs({ 0.5, 0.9, 0.998 }) do
+			local y0, y1 = 1, sz[2] - 1
+			local lo, hi = math.huge, -math.huge
+			for y = y0, y1 - 1 do for x = 0, img.w - 1 do
+				local v = image.get(img, x, y)
+				lo, hi = math.min(lo, v), math.max(hi, v)
+			end end
+			local bins, counts, n = 4096, table.create(4096, 0), 0
+			local scale = bins / (hi - lo)
+			for y = y0, y1 - 1 do for x = 0, img.w - 1 do
+				local i = math.min(math.floor((image.get(img, x, y) - lo) * scale), bins - 1)
+				counts[i + 1] += 1
+				n += 1
+			end end
+			local want, acc = hi, 0
+			for i = 1, bins do
+				acc += counts[i]
+				if acc >= q * n then
+					want = lo + (i - 0.5) / scale
+					break
+				end
+			end
+			t.eq(image.percentile(img, q, y0, y1), want)
+		end
+	end
+end)
+
+t.test("renderk: a ghost view of a crop with a 3 px margin is exact inside", function()
+	local ramp = color.glowRamp("#8e8cd8")
+	local E, R = randF(40, 6, 5, 2), randF(40, 6, 9, 1.5)
+	local full = render.ghostView(E, R, 1.3, 0.9, ramp)
+	local x0, x1 = 12, 25
+	local part = render.ghostView(image.crop(E, x0 - 3, x1 + 3), image.crop(R, x0 - 3, x1 + 3), 1.3, 0.9, ramp)
+	for y = 0, 5 do
+		for x = x0, x1 - 1 do
+			local r1, g1, b1 = ppm.get(full, x, y)
+			local r2, g2, b2 = ppm.get(part, x - x0 + 3, y)
+			if r1 ~= r2 or g1 ~= g2 or b1 ~= b2 then
+				error(`crop ghost differs at {x},{y}`)
+			end
+		end
+	end
+end)
+
+t.test("renderk: the wear map kernel matches wear.pixel for every profile", function()
+	local wear = require("../pixel-shift/core/wear")
+	for _, sz in ipairs(SIZES) do
+		-- values slightly outside 0..1 exercise the clamps
+		local function plane(seed)
+			local img, r = image.new(sz[1], sz[2]), lcg(seed)
+			for y = 0, sz[2] - 1 do
+				for x = 0, sz[1] - 1 do
+					image.set(img, x, y, (r() % 1200) / 1000 - 0.1)
+				end
+			end
+			return img
+		end
+		local lin = { w = sz[1], h = sz[2], r = plane(3 + sz[1]), g = plane(5 + sz[2]), b = plane(7 + sz[1]) }
+		for _, name in ipairs(wear.ORDER) do
+			local p = wear.profile(name)
+			local out = wear.map(p, lin)
+			for y = 0, sz[2] - 1 do
+				for x = 0, sz[1] - 1 do
+					local want = wear.pixel(p, image.get(lin.r, x, y), image.get(lin.g, x, y), image.get(lin.b, x, y))
+					local b4 = buffer.create(4)
+					buffer.writef32(b4, 0, want)
+					if image.get(out, x, y) ~= buffer.readf32(b4, 0) then
+						error(`wear.map {name} {sz[1]}x{sz[2]}: {x},{y} differs`)
+					end
+				end
+			end
+		end
+	end
+end)
+
 return {}

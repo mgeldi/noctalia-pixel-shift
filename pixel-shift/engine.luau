@@ -339,6 +339,26 @@ do
 		end
 	end
 
+	-- r = |e - a| + cw * |e - b| with e = ew + ec, a = aw + ac, b = bw + bc:
+	-- risk.map from its parts (the static window and the moved content)
+	function K.riskCombineParts(ew: buffer, ec: buffer, aw: buffer, ac: buffer, bw: buffer, bc: buffer, r: buffer, n: number, cw: number)
+		local o = 0
+		while o + 4 < n do
+			if o % 65536 == 0 then
+				budget.check()
+			end
+			local e0, e1 = rf(ew, o) + rf(ec, o), rf(ew, o + 4) + rf(ec, o + 4)
+			wf(r, o, math.abs(e0 - (rf(aw, o) + rf(ac, o))) + cw * math.abs(e0 - (rf(bw, o) + rf(bc, o))))
+			wf(r, o + 4, math.abs(e1 - (rf(aw, o + 4) + rf(ac, o + 4))) + cw * math.abs(e1 - (rf(bw, o + 4) + rf(bc, o + 4))))
+			o += 8
+		end
+		while o < n do
+			local e = rf(ew, o) + rf(ec, o)
+			wf(r, o, math.abs(e - (rf(aw, o) + rf(ac, o))) + cw * math.abs(e - (rf(bw, o) + rf(bc, o))))
+			o += 4
+		end
+	end
+
 	-- d[i] += s[i] for i = 1..n (histogram merge; n is a multiple of 8)
 	function K.mergeBins(d, s, n: number)
 		for i = 1, n, 8 do
@@ -374,6 +394,94 @@ do
 		end
 	end
 
+	-- smallest and largest of count f32 values from byte offset o
+	function K.minMax(data: buffer, o: number, count: number): (number, number)
+		local lo, hi = math.huge, -math.huge
+		local stop, k = o + count * 4, 0
+		while o + 12 < stop do
+			k += 1
+			if k % 4096 == 0 then
+				budget.check()
+			end
+			local a, b, c, d = rf(data, o), rf(data, o + 4), rf(data, o + 8), rf(data, o + 12)
+			lo = math.min(lo, a, b, c, d)
+			hi = math.max(hi, a, b, c, d)
+			o += 16
+		end
+		while o < stop do
+			local a = rf(data, o)
+			lo, hi = math.min(lo, a), math.max(hi, a)
+			o += 4
+		end
+		return lo, hi
+	end
+
+	-- like K.histogram, of (v - lo) * scale
+	function K.histogramFrom(bins, data: buffer, o: number, count: number, lo: number, scale: number, top: number)
+		local stop, k = o + count * 4, 0
+		while o + 12 < stop do
+			k += 1
+			if k % 4096 == 0 then
+				budget.check()
+			end
+			local i0 = math.min(math.max(math.floor((rf(data, o) - lo) * scale), 0), top)
+			local i1 = math.min(math.max(math.floor((rf(data, o + 4) - lo) * scale), 0), top)
+			local i2 = math.min(math.max(math.floor((rf(data, o + 8) - lo) * scale), 0), top)
+			local i3 = math.min(math.max(math.floor((rf(data, o + 12) - lo) * scale), 0), top)
+			bins[i0 + 1] += 1
+			bins[i1 + 1] += 1
+			bins[i2 + 1] += 1
+			bins[i3 + 1] += 1
+			o += 16
+		end
+		while o < stop do
+			local i = math.min(math.max(math.floor((rf(data, o) - lo) * scale), 0), top)
+			bins[i + 1] += 1
+			o += 4
+		end
+	end
+
+	-- f32 luma of n RGB8 pixels through a table of f32-rounded linear values,
+	-- exactly as image.luma computes it from wear.linearFromRgb8's planes
+	function K.lumaRgb8(src: buffer, n: number, lut, dst: buffer)
+		local ru = buffer.readu8
+		local i, s, d = 0, 0, 0
+		while i + 1 < n do
+			if i % 4096 == 0 then
+				budget.check()
+			end
+			wf(dst, d, 0.2126 * lut[ru(src, s) + 1] + 0.7152 * lut[ru(src, s + 1) + 1] + 0.0722 * lut[ru(src, s + 2) + 1])
+			wf(dst, d + 4, 0.2126 * lut[ru(src, s + 3) + 1] + 0.7152 * lut[ru(src, s + 4) + 1] + 0.0722 * lut[ru(src, s + 5) + 1])
+			i += 2
+			s += 6
+			d += 8
+		end
+		if i < n then
+			wf(dst, d, 0.2126 * lut[ru(src, s) + 1] + 0.7152 * lut[ru(src, s + 1) + 1] + 0.0722 * lut[ru(src, s + 2) + 1])
+		end
+	end
+
+	-- wear rate per pixel, exactly as wear.pixel computes it: k1 r^n + k2 g^n +
+	-- k3 b^n on channels clamped to 0..1, or with a white subpixel (WOLED)
+	-- taking min(r, g, b) first
+	function K.wearMap(r: buffer, g: buffer, b: buffer, count: number, k1: number, k2: number, k3: number, white: number?, n: number, out: buffer)
+		for o = 0, (count - 1) * 4, 4 do
+			if o % 8192 == 0 then
+				budget.check()
+			end
+			local vr, vg, vb = rf(r, o), rf(g, o), rf(b, o)
+			vr = if vr < 0 then 0 elseif vr > 1 then 1 else vr
+			vg = if vg < 0 then 0 elseif vg > 1 then 1 else vg
+			vb = if vb < 0 then 0 elseif vb > 1 then 1 else vb
+			if white then
+				local m = math.min(vr, vg, vb)
+				wf(out, o, white * m ^ n + k1 * (vr - m) ^ n + k2 * (vg - m) ^ n + k3 * (vb - m) ^ n)
+			else
+				wf(out, o, k1 * vr ^ n + k2 * vg ^ n + k3 * vb ^ n)
+			end
+		end
+	end
+
 	-- Lab images -----------------------------------------------------------
 	local ru8, wu8 = buffer.readu8, buffer.writeu8
 	local floor, clamp, min = math.floor, math.clamp, math.min
@@ -381,15 +489,6 @@ do
 	local function to8(v: number): number
 		v = floor(v + 0.5)
 		return if v < 0 then 0 elseif v > 255 then 255 else v
-	end
-
-	local function srgb(l: number): number
-		if l <= 0 then
-			return 0
-		elseif l >= 1 then
-			return 1
-		end
-		return if l <= 0.0031308 then 12.92 * l else 1.055 * l ^ (1 / 2.4) - 0.055
 	end
 
 	-- 24-bit BMP rows (bottom-up, BGR, each padded to rowSize) from RGB8
@@ -498,11 +597,13 @@ do
 			local u = clamp((tt - 0.16) / (0.55 - 0.16), 0, 1)
 			local a = u * u * (3 - 2 * u)
 			local c = ramp[floor(tt * 255) + 1]
-			local g = rf(base, o) * 255
+			local g = rf(base, o) * 255 * (1 - a)
 			local d = i * 3
-			wu8(dst, d, to8(g * (1 - a) + c[1] * a))
-			wu8(dst, d + 1, to8(g * (1 - a) + c[2] * a))
-			wu8(dst, d + 2, to8(g * (1 - a) + c[3] * a))
+			-- to8() written out: a call per pixel costs a host interrupt check
+			local r, gg, b = floor(g + c[1] * a + 0.5), floor(g + c[2] * a + 0.5), floor(g + c[3] * a + 0.5)
+			wu8(dst, d, if r < 0 then 0 elseif r > 255 then 255 else r)
+			wu8(dst, d + 1, if gg < 0 then 0 elseif gg > 255 then 255 else gg)
+			wu8(dst, d + 2, if b < 0 then 0 elseif b > 255 then 255 else b)
 		end
 	end
 
@@ -515,12 +616,15 @@ do
 			local o = i * 4
 			local tr = clamp(rf(R, o) * inv, 0, 1) ^ 0.7
 			local a = clamp(1.4 * tr, 0, 1)
-			local g = srgb(rf(lum, o)) * 0.2 * 255
+			local l = rf(lum, o) -- srgb() and to8() written out, as in K.glowPixels
+			local sl = if l <= 0 then 0 elseif l >= 1 then 1 elseif l <= 0.0031308 then 12.92 * l else 1.055 * l ^ (1 / 2.4) - 0.055
+			local g = sl * 0.2 * 255 * (1 - a)
 			local c = ramp[floor(tr * 255) + 1]
 			local d = i * 3
-			wu8(dst, d, to8(g * (1 - a) + c[1] * a))
-			wu8(dst, d + 1, to8(g * (1 - a) + c[2] * a))
-			wu8(dst, d + 2, to8(g * (1 - a) + c[3] * a))
+			local r, gg, b = floor(g + c[1] * a + 0.5), floor(g + c[2] * a + 0.5), floor(g + c[3] * a + 0.5)
+			wu8(dst, d, if r < 0 then 0 elseif r > 255 then 255 else r)
+			wu8(dst, d + 1, if gg < 0 then 0 elseif gg > 255 then 255 else gg)
+			wu8(dst, d + 2, if b < 0 then 0 elseif b > 255 then 255 else b)
 		end
 	end
 
@@ -531,9 +635,13 @@ do
 				budget.check()
 			end
 			local o, d = i * 4, i * 3
-			wu8(dst, d, to8(srgb(rf(r, o)) * 255))
-			wu8(dst, d + 1, to8(srgb(rf(g, o)) * 255))
-			wu8(dst, d + 2, to8(srgb(rf(b, o)) * 255))
+			local lr, lg, lb = rf(r, o), rf(g, o), rf(b, o) -- srgb() and to8() written out
+			local vr = floor((if lr <= 0 then 0 elseif lr >= 1 then 1 elseif lr <= 0.0031308 then 12.92 * lr else 1.055 * lr ^ (1 / 2.4) - 0.055) * 255 + 0.5)
+			local vg = floor((if lg <= 0 then 0 elseif lg >= 1 then 1 elseif lg <= 0.0031308 then 12.92 * lg else 1.055 * lg ^ (1 / 2.4) - 0.055) * 255 + 0.5)
+			local vb = floor((if lb <= 0 then 0 elseif lb >= 1 then 1 elseif lb <= 0.0031308 then 12.92 * lb else 1.055 * lb ^ (1 / 2.4) - 0.055) * 255 + 0.5)
+			wu8(dst, d, if vr < 0 then 0 elseif vr > 255 then 255 else vr)
+			wu8(dst, d + 1, if vg < 0 then 0 elseif vg > 255 then 255 else vg)
+			wu8(dst, d + 2, if vb < 0 then 0 elseif vb > 255 then 255 else vb)
 		end
 	end
 end
@@ -542,12 +650,12 @@ image.install(K)
 risk.install(K)
 render.install(K)
 bmp.install(K)
+wear.install(K)
 
 local PROBE = 8 -- logical px each spacer is widened by while measuring
 local SETTLE_MS = 150 -- wait after the spacers acknowledged before capturing
 local STALE = 120 -- s without a hello before a spacer is dropped
 local MIN_SAMPLES = 6 -- exposure samples before they replace the scan
-local OPT_SLICE_MS = 6
 local SLICE_MS = 8 -- Noctalia stops a callback after ~25 ms of CPU
 
 -- persisted preferences and per-output records -------------------------------
@@ -574,6 +682,9 @@ local seq = 0
 local ui = { output = nil, view = "ghost", mode = "strategy", hotspot = 1 }
 local status = { kind = "idle" }
 local labOpen, labDirty = false, true
+local labClosedAt = nil -- os.time() the lab closed; its caches go two minutes later
+local prewarmDue = false -- the data changed: warm what the lab shows first, when idle
+local PREWARM_DAYS = 14 -- only for someone who opened the lab this recently
 local dataDirty = true -- lab images/data need rebuilding (not just the status line)
 local lastData = nil
 local themeHex = saved.themeHex -- the theme's primary colour, remembered across restarts
@@ -589,9 +700,10 @@ local timing, lastCmdAt = false, 0 -- IPC "timing on": log how long the lab take
 -- Heavy core loops call budget.check(); inside a task or the optimiser this
 -- yields once the slice is used up, so no callback comes near the host's
 -- CPU budget. Outside a coroutine it does nothing.
-local sliceStart = os.clock()
+-- One deadline per callback for every task and the optimiser together.
+local sliceEnd = 0
 budget.hook = function()
-	if (os.clock() - sliceStart) * 1000 >= SLICE_MS and coroutine.isyieldable() then
+	if os.clock() >= sliceEnd and coroutine.isyieldable() then
 		coroutine.yield()
 	end
 end
@@ -741,7 +853,8 @@ local function rebuildLayers(O)
 		O.variance = nil
 	end
 	O.layersId += 1
-	O.evalCache, O.evalOrder = nil, nil
+	O.evalCache, O.evalOrder, O.renderCache = nil, nil, nil
+	prewarmDue = true
 	labDirty = true
 	dataDirty = true
 end
@@ -760,13 +873,13 @@ local function restore(O, fp: string): boolean
 		return false
 	end
 	local l = store.readJson(fileName("layout", O.name) .. ".json")
-	local base, bg = scanstore.decode(store.read(fileName("scan", O.name) .. ".bin"))
+	local base, bg = scanstore.decode(store.readAsync(fileName("scan", O.name) .. ".bin"))
 	if not decide.validLayout(l, base) then
 		return false
 	end
 	O.layout, O.base, O.bg, O.baseL = l, base, bg, image.luma(base)
 	O.info = meta.info
-	O.acc = exposure.deserialize(store.read(fileName("exposure", O.name) .. ".bin"))
+	O.acc = exposure.deserialize(store.readAsync(fileName("exposure", O.name) .. ".bin"))
 	if O.acc and (O.acc.w ~= base.w or O.acc.h ~= base.h) then
 		O.acc = nil
 	end
@@ -796,6 +909,7 @@ local function applyStrategy(name: string, strategy, record: boolean?)
 	end
 	meta.strategy = { ranges = table.clone(strategy.ranges), vertical = strategy.vertical or 0, lambdaT = strategy.lambdaT or saved.lambdaT }
 	persist()
+	prewarmDue = true
 	labDirty = true
 	dataDirty = true
 end
@@ -957,22 +1071,7 @@ local function fail(name: string, message: string?)
 	setStatus({ kind = "error", message = errors.scan })
 end
 
-local function locked(): boolean
-	local sid = noctalia.getenv("XDG_SESSION_ID")
-	if not sid or sid == "" or not noctalia.commandExists("loginctl") then
-		return false
-	end
-	local res = tasks.await(function(done)
-		if not noctalia.runAsync({ "loginctl", "show-session", sid, "-p", "LockedHint", "--value" }, done, 3000) then
-			done(nil)
-		end
-	end)
-	return res ~= nil and res.exitCode == 0 and string.find(res.stdout, "yes", 1, true) ~= nil
-end
-
-local function lumaFromCapture(img)
-	return image.luma(wear.linearFromRgb8(img))
-end
+local lumaFromCapture = wear.lumaFromRgb8
 
 local function scanTask(name: string)
 	tasks.spawn("scan:" .. name, function()
@@ -983,12 +1082,6 @@ local function scanTask(name: string)
 			if O then
 				O.needsScan = false
 			end
-			return
-		end
-		if locked() then
-			O.failures += 1
-			O.retryAt = os.time() + decide.backoff(O.failures)
-			noctalia.log(`pixel-shift: session locked, measuring {name} later`)
 			return
 		end
 		if O.coveredL then
@@ -1077,9 +1170,7 @@ local function scanTask(name: string)
 			return capture.grab(geom.geometry, geom.transpose)
 		end
 
-		local function lumaOf(img)
-			return image.luma(wear.linearFromRgb8(img))
-		end
+		local lumaOf = wear.lumaFromRgb8
 		local baseA, err = shot(zero)
 		if not baseA then
 			return fail(name, err)
@@ -1177,6 +1268,7 @@ local function scanTask(name: string)
 		O.scanLayers = {}
 		O.approximate = verr > layoutMod.VERIFY_LIMIT or #odd > 0
 		O.lastCapture = baseA
+		O.captureSeq = (O.captureSeq or 0) + 1
 		O.info = { width = out.width, thickness = bar.thickness, scale = scale, bright = exposure.brightFraction(baseA) }
 		local fp = fingerprintFor(name, bar, out)
 		local meta = saved.outputs[name] or {}
@@ -1213,7 +1305,9 @@ local function scanTask(name: string)
 end
 
 local function saveExposure(O)
-	store.write(fileName("exposure", O.name) .. ".bin", exposure.serialize(O.acc))
+	local data = exposure.serialize(O.acc)
+	coroutine.yield() -- serializing 4 MB and writing it are two slices, not one
+	store.write(fileName("exposure", O.name) .. ".bin", data)
 end
 
 local function sampleTask(name: string)
@@ -1223,9 +1317,6 @@ local function sampleTask(name: string)
 			return
 		end
 		O.lastSample = os.time()
-		if locked() then
-			return
-		end
 		local out, bar = outputInfo(name), barInfo()
 		if not out then
 			return
@@ -1244,8 +1335,10 @@ local function sampleTask(name: string)
 		local now = os.time()
 		local offs = if saved.paused then {} else schedule.offsets(activeStrategy(name), spacersOn(name), now, setting("step_minutes", 4))
 		local vRows = if vertical.active() and lastVertical > 0 then math.floor(lastVertical * O.layout.scale + 0.5) else 0
-		local back = exposure.unshift(wear.linearFromRgb8(img), O.layout, util.displacements(O.layout, offs), vRows)
-		local backL = image.luma(back)
+		local disp = util.displacements(O.layout, offs)
+		-- the match test needs only luma: a frame that does not show the bar
+		-- never pays for the linear planes
+		local backL = exposure.unshiftImage(wear.lumaFromRgb8(img), O.layout, disp, vRows)
 		if not exposure.matchesBaseline(backL, O.baseL, O.layout) then
 			-- something covers the bar, or it looks different now; measure again
 			-- only when several samples in a row show the same picture
@@ -1264,7 +1357,9 @@ local function sampleTask(name: string)
 		end
 		O.mismatches, O.mismatchRef = 0, nil
 		O.lastCapture = img
-		exposure.add(O.acc, back, now)
+		O.captureSeq = (O.captureSeq or 0) + 1
+		local back = exposure.unshift(wear.linearFromRgb8(img), O.layout, disp, vRows)
+		exposure.add(O.acc, back, now, backL)
 		if decide.persistExposure(O.acc.n) then
 			saveExposure(O)
 		end
@@ -1396,13 +1491,13 @@ end
 
 -- The lab's advice about the bar config. Noctalia logs a warning for every
 -- lookup of a widget key that is not set, so this is read again only when the
--- bar's sections change, or after a minute, never on every lab render.
+-- bar's sections change, or after five minutes, never on every lab render.
 local barAdviceCache = { key = nil, at = 0, anchor = nil, placement = {} }
 local function barAdvice()
 	local bar = barInfo()
 	local key = util.stableEncode({ bar.name, bar.layout[1], bar.layout[2], bar.layout[3] })
 	local now = os.time()
-	if key ~= barAdviceCache.key or now - barAdviceCache.at >= 60 then
+	if key ~= barAdviceCache.key or now - barAdviceCache.at >= 300 then
 		barAdviceCache = { key = key, at = now, anchor = anchoredCenterWidget(bar), placement = misplacedSpacers(bar) }
 	end
 	return barAdviceCache
@@ -1447,16 +1542,23 @@ local function warmLab(O, ctx)
 			end
 		end
 		local shown = nil
-		while warmQueue do
-			local job = warmQueue
-			warmQueue = nil
-			warmedFor, shown = job.key, job.O
-			prepare(job.O, job.ctx, table.clone(ui))
+		local function drain()
+			while warmQueue do
+				local job = warmQueue
+				warmQueue = nil
+				warmedFor, shown = job.key, job.O
+				prepare(job.O, job.ctx, table.clone(ui))
+			end
 		end
+		drain()
 		for _, other in pairs(outputs) do
-			if other ~= shown and other.layout and other.layers and labOpen then
+			if not labOpen then
+				break
+			end
+			if other ~= shown and other.layout and other.layers then
 				prepare(other, labCtx(other), { hotspot = 1 })
 			end
+			drain() -- a newer request while the other outputs warm goes first
 		end
 	end)
 end
@@ -1511,8 +1613,11 @@ local function renderLab()
 			lastData = data
 			warmLab(O, ctx)
 		else
+			lastData = nil -- never republish another output's or an older state's data
 			noctalia.log("pixel-shift: lab render failed: " .. tostring(data))
 		end
+	else
+		lastData = nil
 	end
 	noctalia.state.set("lab:model", model)
 	if timing then
@@ -1619,6 +1724,11 @@ local function handle(cmd: string, arg)
 		setPaused(cmd == "pause")
 	elseif cmd == "open" then
 		labOpen = arg ~= false
+		labClosedAt = if labOpen then nil else os.time()
+		if labOpen then
+			saved.labOpenedAt = os.time()
+			persist()
+		end
 		if labOpen and not tasks.running("theme") then
 			tasks.spawn("theme", function()
 				local hex = theme.resolve(ui.output)
@@ -1678,14 +1788,15 @@ function onIpc(event, payload)
 		end
 		local outs = {}
 		for name, O in pairs(outputs) do
-			table.insert(outs, `{name}: fp={tostring(O.fp)} layout={O.layout ~= nil} scan={O.needsScan} opt={O.needsOptimize} retry={O.retryAt}`)
+			table.insert(outs, `{name}: fp={tostring(O.fp)} layout={O.layout ~= nil} scan={O.needsScan} opt={O.needsOptimize} retry={O.retryAt} samples={if O.acc then O.acc.n else 0}`)
 		end
 		local ws = {}
 		for id, v in pairs(widths) do
 			table.insert(ws, `{id}={v}`)
 		end
 		table.sort(ws)
-		noctalia.log(`pixel-shift debug: spacers=[{table.concat(ids, ", ")}] outputs=[{table.concat(outs, "; ")}] status={status.kind} tasks={tasks.active()} optimizer={optimizer ~= nil} widths=[{table.concat(ws, ", ")}]`)
+		local heap = if gcinfo then `{math.floor(gcinfo() / 1024)} MB` else "?"
+		noctalia.log(`pixel-shift debug: heap={heap} spacers=[{table.concat(ids, ", ")}] outputs=[{table.concat(outs, "; ")}] status={status.kind} tasks={tasks.active()} optimizer={optimizer ~= nil} widths=[{table.concat(ws, ", ")}]`)
 		return
 	end
 	if event == "pause" or event == "resume" or event == "toggle" or event == "rescan" or event == "optimize" then
@@ -1712,13 +1823,26 @@ function onIpc(event, payload)
 	end
 end
 
+-- Plugin settings changed. Only the panel profile changes the layers and
+-- only it and max_shift the strategy; the step and sample intervals are read
+-- as they are used.
+local lastSettings = { profile = profileName(), maxShift = setting("max_shift", 16) }
 function onConfigChanged()
+	local profile, maxShift = profileName(), setting("max_shift", 16)
+	local newProfile, newShift = profile ~= lastSettings.profile, maxShift ~= lastSettings.maxShift
+	lastSettings.profile, lastSettings.maxShift = profile, maxShift
 	for _, O in pairs(outputs) do
 		if O.layout then
-			rebuildLayersAsync(O)
-			O.needsOptimize = true
+			if newProfile then
+				rebuildLayersAsync(O)
+			end
+			if newProfile or newShift then
+				O.needsOptimize = true
+			end
 		end
 	end
+	labDirty = true
+	dataDirty = true
 end
 
 function onOutputsChanged()
@@ -1733,13 +1857,20 @@ end
 
 function update()
 	local now = os.time()
-	sliceStart = os.clock()
+	sliceEnd = os.clock() + SLICE_MS / 1000
+	-- the lab render does not wait for other tasks, and starts in the tick it
+	-- was asked for: the newest task runs first in each slice
+	if labOpen and labDirty and not tasks.running("lab") then
+		labDirty = false
+		tasks.spawn("lab", renderLab)
+	end
 	tasks.tick()
-	if optimizer then
-		local left = math.max(1, OPT_SLICE_MS - (os.clock() - sliceStart) * 1000)
-		sliceStart = os.clock()
+	-- the optimiser gets what the tasks left of this callback's slice
+	local left = (sliceEnd - os.clock()) * 1000
+	if optimizer and left >= 1 then
+		local t0 = os.clock()
 		local stepDone = optimizer.opt:step(left)
-		optimizer.cpu = (optimizer.cpu or 0) + (os.clock() - sliceStart)
+		optimizer.cpu = (optimizer.cpu or 0) + (os.clock() - t0)
 		optimizer.steps = (optimizer.steps or 0) + 1
 		if stepDone then
 			finishOptimize()
@@ -1749,6 +1880,18 @@ function update()
 	end
 	if now ~= lastSlow then
 		lastSlow = now
+		if labClosedAt and now - labClosedAt >= 120 and not tasks.running("lab-warm") then
+			-- the lab's caches (evaluations, views, images) are 10-25 MB: drop them
+			-- until it opens again
+			labClosedAt = nil
+			for _, O in pairs(outputs) do
+				O.evalCache, O.evalOrder, O.renderCache = nil, nil, nil
+			end
+			lastData, warmedFor, warmQueue = nil, nil, nil
+			noctalia.state.set("lab:model", nil)
+			store.cleanRenders()
+			prewarmDue = true -- keep only what the lab shows first
+		end
 		local pruned, changed = util.pruneRegistry(spacers, now, STALE)
 		if changed then
 			spacers = pruned
@@ -1789,17 +1932,26 @@ function update()
 					break
 				end
 			end
+			local opened = saved.labOpenedAt
+			if prewarmDue and not labOpen and not tasks.active() and not optimizer
+				and opened and now - opened < PREWARM_DAYS * 86400 then
+				prewarmDue = false
+				tasks.spawn("lab-prewarm", function()
+					for _, O in pairs(outputs) do
+						if O.layout and O.layers then
+							local ok, err = pcall(labmodel.warm, O, labCtx(O))
+							if not ok then
+								noctalia.log("pixel-shift: lab warm-up failed: " .. tostring(err))
+							end
+						end
+					end
+				end)
+			end
 		end
 		if not forced then
 			publishWidths(false)
 		end
 		playVertical(now)
-	end
-	-- the lab render does not wait for other tasks: the newest task runs
-	-- first in each slice, so a click is answered before a sample finishes
-	if labOpen and labDirty and not tasks.running("lab") then
-		labDirty = false
-		tasks.spawn("lab", renderLab)
 	end
 	noctalia.setUpdateInterval(if tasks.running("lab") then 16 elseif optimizer or tasks.active() then 33 else 1000)
 end

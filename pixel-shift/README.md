@@ -19,8 +19,8 @@ risk is, how much the strategy removes, and what shifting cannot fix.
 Install `grim` on `PATH`. It captures the bar strip, so the plugin works on
 compositors with wlr-screencopy (Hyprland, niri, sway, labwc, mangowc).
 
-When `loginctl` (systemd) is available, Pixel Shift uses it to skip samples while the
-session is locked.
+Captures that do not show the bar (a lock screen, a fullscreen window) are recognised
+from the picture itself and skipped.
 
 ## Usage
 
@@ -166,20 +166,21 @@ picks it up within seconds.
   Written every 6 samples.
 Lab images (including the **Bar** view, which shows the latest capture) go to
 `$XDG_RUNTIME_DIR/pixel-shift-render/` (memory, emptied at logout; the data
-directory's `render/` when there is no runtime directory). Up to 16 per image are
-kept for quick switching, and all are removed when the plugin starts.
+directory's `render/` when there is no runtime directory). Up to 8 per image are
+kept for quick switching; all are removed two minutes after the lab closes and when
+the plugin starts.
 
 Captures are written briefly to `$XDG_RUNTIME_DIR/pixel-shift-*.ppm` and deleted after
 reading. With vertical shift on: `zz-pixel-shift.toml` in the Noctalia config
 directory (written as `zz-pixel-shift.toml.tmp` and renamed into place).
 
-**Processes.** `grim` (during a measurement and every `sample_minutes`), `loginctl
-show-session` (before each measurement and sample, when available), `noctalia msg
+**Processes.** `grim` (during a measurement and every `sample_minutes`), `noctalia msg
 config-reload` (after the vertical override is removed, and once more if Noctalia did
 not pick up a new override by itself), `noctalia msg settings-open bar` (the lab's
 onboarding button).
 On Noctalia versions without `noctalia.getColor`, opening the lab runs `noctalia msg
-color-scheme-get` and `noctalia theme <wallpaper>` to find the theme colour.
+color-scheme-get`, and `noctalia theme <wallpaper>` when the scheme or wallpaper
+changed, to find the theme colour.
 
 **Privacy.** Only the bar strip and 8 px below it are captured. The capture from the
 last measurement stays in the data directory (see above) and can show window or media
@@ -188,6 +189,8 @@ the plugin makes no network requests.
 
 **Performance.** Measuring, optimising and rendering run in small slices between
 frames, so the shell stays responsive. A search takes a few seconds of CPU per output,
-spread over a minute or less. The lab renders every view of the current strategy in
-the background after it opens, so switching views, modes, hotspots and outputs takes
-a few tens of milliseconds.
+spread over a minute or less. For someone who opened the lab in the last two weeks,
+Pixel Shift prepares its first view in idle time after the data changed, so it opens
+without waiting; once open, it renders every view of the current strategy in the
+background, so switching views, modes, hotspots and outputs takes a few tens of
+milliseconds. Two minutes after the lab closes, its caches are released.
