@@ -19,6 +19,31 @@ Machine: DP-2 2560×1440 at scale 1, DP-3 2560×1440 logical at scale 1.5
 | Vertical | Override written from the stored base (margin 0 / thickness 34 → 2 / 32); window geometry unchanged; spacer ids and fingerprints unchanged across the config reload (no rescan); disabling removes the file. |
 | Reload | Plugin disable/enable restores both scans without measuring again. |
 
+## Second round (same evening): responsiveness and measurement
+
+| Check | Before | After |
+|---|---|---|
+| Lab: first open | 4.9 s (two renders: the theme colour arrived late) | 1.5 s, one render |
+| Lab: view or mode switch | 3.5–4.3 s (full rebuild, up to 1 s tick wait) | ~33 ms (cached, background warm-up) |
+| Lab: hotspot switch | 4.2 s | 53–65 ms |
+| Lab: switch to DP-3 | 9.0 s | 33 ms (warmed in the background) |
+| Click during a render | lost | picked up by the next render |
+
+Measured with the `timing on` IPC event while driving the lab over IPC.
+
+- DP-3's start section had been measured at 0.375 (then 0.75) instead of 1.5.
+  Dumped capture pairs showed the whole section moving by exactly 12 px; a
+  1 px sliver next to the ignored CPU digits had set the factor of the whole
+  group. Factors are now voted by change width, shifts must be ones a spacer
+  can cause, and the all-spacers capture vetoes spurious spacers. DP-3 now:
+  start ×1.5, centre ±0.75, end −1.5, verify error 0.04–0.09 (was 0.44–0.59).
+- Covered bar: with a fullscreen video on DP-2, a rescan first saw "nothing
+  moved" (kept the old measurement, as intended), then accepted a frame whose
+  motion lined up with a spacer shift (verify error 15632). Such measurements
+  are now rejected, and retries look before they measure while the bar stays
+  covered.
+- Unit tests: 108 passed, kernels in sync.
+
 Not exercised live: the lock-screen sample skip (would lock the user's
 session), clicking the control-center tile (not placed in this user's
 control center), the onboarding and "grim missing" states (spacers and grim
