@@ -1,0 +1,25 @@
+{
+  "settings": {
+    "panel_profile": {
+      "label": "Panel type",
+      "description": "Which OLED technology your screen uses. Changes how much each colour channel wears.",
+      "options": {
+        "generic": "Generic OLED (blue wears fastest)",
+        "woled": "WOLED (LG panels)",
+        "qdoled": "QD-OLED (Samsung panels)"
+      }
+    },
+    "sample_minutes": {
+      "label": "Sampling interval (minutes)",
+      "description": "How often the bar is captured to learn what it shows over the day."
+    },
+    "step_minutes": {
+      "label": "Step time (minutes)",
+      "description": "Time between 1 px moves. Spacers use slightly different multiples so they never move in step."
+    },
+    "max_shift": {
+      "label": "Maximum shift (px)",
+      "description": "Upper limit for how far any group may move."
+    }
+  }
+}

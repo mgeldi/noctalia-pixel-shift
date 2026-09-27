@@ -1,0 +1,15 @@
+name: tests
+on:
+  push:
+  pull_request:
+jobs:
+  luau:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install luau 0.740
+        run: |
+          curl -sSL -o luau.zip https://github.com/luau-lang/luau/releases/download/0.740/luau-ubuntu.zip
+          mkdir -p .tools/bin && unzip -q luau.zip -d .tools/bin && chmod +x .tools/bin/*
+      - name: Run tests
+        run: tools/test.sh
