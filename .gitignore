@@ -3,3 +3,4 @@
 *.ppm
 /scratch/
 .tools/
+.impeccable/

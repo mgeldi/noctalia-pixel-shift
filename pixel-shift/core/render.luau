@@ -120,7 +120,8 @@ end
 -- Outline of the full-width columns [x0, x1) on the two overview halves from
 -- M.halves (fullW wide before halving), drawn in place at the halves' own
 -- resolution so the 1 px line stays crisp.
-function M.frameHalves(left, right, x0: number, x1: number, fullW: number, rgb)
+function M.frameHalves(left, right, x0: number, x1: number, fullW: number, rgb, thickness: number?)
+	local t = thickness or 1
 	local mid = fullW // 2
 	local function part(img, h0: number, h1: number)
 		local a, b = math.max(x0, h0), math.min(x1, h1)
@@ -130,21 +131,32 @@ function M.frameHalves(left, right, x0: number, x1: number, fullW: number, rgb)
 		local f = img.w / (h1 - h0)
 		local px0 = math.min(math.floor((a - h0) * f), img.w - 1)
 		local px1 = math.max(px0 + 1, math.min(img.w, math.ceil((b - h0) * f)))
-		for x = px0, px1 - 1 do
-			ppm.set(img, x, 0, rgb[1], rgb[2], rgb[3])
-			ppm.set(img, x, img.h - 1, rgb[1], rgb[2], rgb[3])
-		end
-		for y = 0, img.h - 1 do
-			if a == x0 then
-				ppm.set(img, px0, y, rgb[1], rgb[2], rgb[3])
+		for k = 0, t - 1 do
+			for x = px0, px1 - 1 do
+				ppm.set(img, x, math.min(k, img.h - 1), rgb[1], rgb[2], rgb[3])
+				ppm.set(img, x, math.max(img.h - 1 - k, 0), rgb[1], rgb[2], rgb[3])
 			end
-			if b == x1 then
-				ppm.set(img, px1 - 1, y, rgb[1], rgb[2], rgb[3])
+			for y = 0, img.h - 1 do
+				if a == x0 then
+					ppm.set(img, math.min(px0 + k, img.w - 1), y, rgb[1], rgb[2], rgb[3])
+				end
+				if b == x1 then
+					ppm.set(img, math.max(px1 - 1 - k, 0), y, rgb[1], rgb[2], rgb[3])
+				end
 			end
 		end
 	end
 	part(left, 0, mid)
 	part(right, mid, fullW)
+end
+
+-- A bar of `rows` px along the bottom of columns [x0, x1), drawn in place.
+function M.underline(img, x0: number, x1: number, rows: number, rgb)
+	for y = math.max(img.h - rows, 0), img.h - 1 do
+		for x = math.max(x0, 0), math.min(x1, img.w) - 1 do
+			ppm.set(img, x, y, rgb[1], rgb[2], rgb[3])
+		end
+	end
 end
 
 -- Horizontal legend strip: neutral grey fading into the glow ramp.

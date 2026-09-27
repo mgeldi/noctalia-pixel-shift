@@ -560,7 +560,7 @@ do
 				budget.check()
 			end
 			local e = clamp(rf(E, o) * inv, 0, 1)
-			wf(dst, o, (0.60 - 0.40 * e ^ 0.8) * 0.72)
+			wf(dst, o, (0.60 - 0.40 * e ^ 0.8) * 0.533) -- neutral 0.32: the glow carries, not the grey
 		end
 	end
 

@@ -16,9 +16,12 @@ local store = require("./store.luau")
 
 local M = {}
 
-M.OVERVIEW_W = 860
-M.INSPECT_W = 560
+-- sized for the lab's cards (content 928 px, cards padded by 12)
+M.OVERVIEW_W = 904
+M.INSPECT_W = 534
 M.INSPECT_MAX_H = 112
+M.METER_W = 328 -- the risk scale in the sidebar
+M.THUMB_ASPECT = 64 / 24 -- hotspot thumbnails, shown at 64 x 24
 
 local function hex(c)
 	return string.format("#%02x%02x%02x", c[1], c[2], c[3])
@@ -275,35 +278,54 @@ function M.build(O, ui, ctx)
 	end)
 	local overview = files(O, ctx, `ov|{ui.view}|{shownKey}|{captureKey}|{ctx.primary}|{rx0}`, function()
 		local left, right = render.copy(halves.left), render.copy(halves.right)
-		render.frameHalves(left, right, rx0, rx1, layout.w, ramp[230])
+		render.frameHalves(left, right, rx0, rx1, layout.w, ramp[230], 2)
 		return { h = left.h, paths = { left = write("overview-l", bmp.encode(left)), right = write("overview-r", bmp.encode(right)) } }
 	end)
 	-- the two inspector strips are cached apart: a new strategy leaves "no shift" alone
+	-- the spot's own columns get a glow bracket along the bottom of both strips
+	local mark = if sel then `{sel.x0}-{sel.x1}` else "-"
 	local function strip(slot: string, ev, key: string)
-		return files(O, ctx, `{slot}|{ui.view}|{key}|{captureKey}|{ctx.primary}|{rx0}`, function()
+		return files(O, ctx, `{slot}|{ui.view}|{key}|{captureKey}|{ctx.primary}|{rx0}|{mark}`, function()
 			local img, ox = stretch(ui.view, ev, key, rx0, rx1)
-			return { paths = { path = write(slot, bmp.encode(render.zoom(img, ox, ox + rx1 - rx0, iy0, iy1, zoom))) } }
+			local out = render.zoom(img, ox, ox + rx1 - rx0, iy0, iy1, zoom)
+			if sel then
+				render.underline(out, (math.max(sel.x0, rx0) - rx0) * zoom, (math.min(sel.x1, rx1) - rx0) * zoom, 2 * zoom, ramp[230])
+			end
+			return { paths = { path = write(slot, bmp.encode(out)) } }
 		end)
 	end
 	local inspector = {
 		paths = { none = strip("inspect-none", evNone, nKey).paths.path, strategy = strip("inspect-strategy", evStrat, sKey).paths.path },
 	}
 	local legend = files(O, ctx, `legend|{ctx.primary}`, function() -- tiny; evicted and redone rarely
-		return { paths = { legend = write("legend", bmp.encode(render.legend(ramp, 120, 8))) } }
+		return { paths = { legend = write("legend", bmp.encode(render.legend(ramp, M.METER_W, 8))) } }
 	end)
 	-- what each hotspot looks like on the bar itself
-	local thumbs = files(O, ctx, `thumbs|{sKey}|{ctx.profile}|{seq}`, function()
+	-- one fixed 64:24 window around each spot, its columns underlined in glow
+	local thumbs = files(O, ctx, `thumbs|{sKey}|{ctx.profile}|{seq}|{ctx.primary}`, function()
 		local barView = view("bar")
-		local pad = math.ceil(12 * (layout.scale or 1))
-		local paths, sizes = {}, {}
+		local rows = layout.barRows[2] - layout.barRows[1]
+		local winW = math.min(math.floor(rows * M.THUMB_ASPECT + 0.5), layout.w)
+		local paths = {}
 		for i, s in ipairs(spots) do
-			local x0, x1 = math.max(s.x0 - pad, 0), math.min(s.x1 + pad, layout.w)
-			local img = render.zoom(barView, x0, x1, layout.barRows[1], layout.barRows[2], 1)
+			local x0 = math.clamp((s.x0 + s.x1) // 2 - winW // 2, 0, layout.w - winW)
+			local img = render.zoom(barView, x0, x0 + winW, layout.barRows[1], layout.barRows[2], 1)
+			render.underline(img, math.max(s.x0 - x0, 0), math.min(s.x1 - x0, winW), math.max(2, rows // 12), ramp[230])
 			paths[i] = write(`thumb-{i}`, bmp.encode(img))
-			sizes[i] = { w = img.w, h = img.h }
 		end
-		return { paths = paths, sizes = sizes }
+		return { paths = paths }
 	end)
+
+	-- a spot's peak risk without shifting (% of the reference), for the inspector
+	local function peakIn(R, x0: number, x1: number): number
+		local best = 0
+		for y = iy0, iy1 - 1 do
+			for x = math.max(x0, 0), math.min(x1, R.w) - 1 do
+				best = math.max(best, image.get(R, x, y))
+			end
+		end
+		return 100 * best / O.rref
+	end
 
 	local scale = M.OVERVIEW_W / half
 	local pins = {}
@@ -346,10 +368,17 @@ function M.build(O, ui, ctx)
 		maxShift = ctx.maxShift,
 		previewing = ctx.previewing,
 		canRevert = ctx.canRevert,
+		liveSince = ctx.liveSince,
+		output = O.name,
 	}
 	for i, s in ipairs(spots) do
 		data.hotspots[i] = { n = i, side = s.side, x0 = s.x0, x1 = s.x1, cause = s.cause, peak = s.peak, level = s.level,
-			thumb = if thumbs.paths[i] then { path = thumbs.paths[i], w = thumbs.sizes[i].w, h = thumbs.sizes[i].h } else nil }
+			thumb = thumbs.paths[i],
+			-- in the output's logical px, like the bar settings the user knows
+			lx0 = math.floor(s.x0 / (layout.scale or 1)),
+			lx1 = math.ceil(s.x1 / (layout.scale or 1)),
+			peakNone = peakIn(evNone.R, s.x0, s.x1),
+		}
 	end
 	for _, slot in ipairs(sortedSlots(layout)) do
 		local label = M.slotLabel(layout, slot)
@@ -384,6 +413,9 @@ function M.build(O, ui, ctx)
 			pick = pickIndex,
 			pickV = pick and pick.V or 0,
 			pickScore = pick and pick.score or nil,
+			-- what the next step of movement would still buy, for the pick note
+			nextPx = if pickIndex and r.budgets[pickIndex + 1] then r.budgets[pickIndex + 1] else nil,
+			nextScore = if pickIndex and r.budgets[pickIndex + 1] then h[pickIndex + 1] else nil,
 		}
 		data.status = { at = r.at, evals = r.evals, seconds = r.seconds }
 	end

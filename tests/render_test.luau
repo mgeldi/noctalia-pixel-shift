@@ -9,8 +9,8 @@ t.test("render: ghost grey range", function()
 	local E = image.new(2, 1)
 	image.set(E, 1, 0, 5)
 	local g = render.ghostGray(E, 5)
-	t.near(image.get(g, 0, 0), 0.6 * 0.72, 1e-6)
-	t.near(image.get(g, 1, 0), 0.2 * 0.72, 1e-6)
+	t.near(image.get(g, 0, 0), 0.6 * 0.533, 1e-6) -- neutral 0.32
+	t.near(image.get(g, 1, 0), 0.2 * 0.533, 1e-6)
 end)
 
 t.test("render: glow is the base where risk is zero and the ramp top at the peak", function()

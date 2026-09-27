@@ -116,7 +116,7 @@ t.test("renderk: ghost view matches the reference", function()
 		for y = 0, E.h - 1 do
 			for x = 0, E.w - 1 do
 				local e = math.clamp(image.get(E, x, y) / eRef, 0, 1)
-				image.set(base, x, y, (0.60 - 0.40 * e ^ 0.8) * 0.72)
+				image.set(base, x, y, (0.60 - 0.40 * e ^ 0.8) * 0.533)
 			end
 		end
 		local tImg = image.new(R.w, R.h)

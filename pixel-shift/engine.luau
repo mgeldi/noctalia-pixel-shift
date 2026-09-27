@@ -572,7 +572,7 @@ do
 				budget.check()
 			end
 			local e = clamp(rf(E, o) * inv, 0, 1)
-			wf(dst, o, (0.60 - 0.40 * e ^ 0.8) * 0.72)
+			wf(dst, o, (0.60 - 0.40 * e ^ 0.8) * 0.533) -- neutral 0.32: the glow carries, not the grey
 		end
 	end
 
@@ -907,7 +907,7 @@ local function applyStrategy(name: string, strategy, record: boolean?)
 			table.remove(meta.history)
 		end
 	end
-	meta.strategy = { ranges = table.clone(strategy.ranges), vertical = strategy.vertical or 0, lambdaT = strategy.lambdaT or saved.lambdaT }
+	meta.strategy = { ranges = table.clone(strategy.ranges), vertical = strategy.vertical or 0, lambdaT = strategy.lambdaT or saved.lambdaT, at = os.time() }
 	persist()
 	prewarmDue = true
 	labDirty = true
@@ -1518,6 +1518,7 @@ local function labCtx(O)
 		maxShift = setting("max_shift", 16),
 		stepMinutes = setting("step_minutes", 4),
 		canRevert = meta.history ~= nil and #meta.history > 0,
+		liveSince = meta.strategy and meta.strategy.at,
 	}
 end
 
@@ -1701,6 +1702,10 @@ local function handle(cmd: string, arg)
 		O.preview = { ranges = table.clone(p.ranges), vertical = math.clamp(math.floor(tonumber(arg) or 0), 0, 2) }
 	elseif cmd == "allowVertical" then
 		setAllowVertical(arg == true)
+	elseif cmd == "discard" then
+		if O then
+			O.preview = nil
+		end
 	elseif cmd == "apply" then
 		if O and O.preview then
 			applyStrategy(name, O.preview)
