@@ -6,6 +6,8 @@ local image = require("./image.luau")
 local util = require("./util.luau")
 local simulate = require("./simulate.luau")
 
+local budget = require("./budget.luau")
+
 local M = {}
 
 M.THRESHOLD = 0.35 -- fraction of the reference risk
@@ -16,6 +18,9 @@ M.VAR_DYNAMIC = 0.002 -- luma variance across samples
 local function regionsIn(R, thr, y0, y1, outside, out)
 	local cur
 	for x = 0, R.w - 1 do
+		if x % 64 == 0 then
+			budget.check()
+		end
 		local hot = false
 		for y = y0, y1 - 1 do
 			if image.get(R, x, y) > thr then

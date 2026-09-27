@@ -54,6 +54,21 @@ t.test("simulate: shifting lowers the score", function()
 	t.ok(image.percentile(e6.R, 1) < 0.5 * image.percentile(e0.R, 1), "peak risk should more than halve")
 end)
 
+t.test("simulate: active ranges shrink group windows without changing the result", function()
+	local layers, layout = fixture()
+	layout.groups[1].own0, layout.groups[1].own1 = 0, W -- group owns everything
+	local active = simulate.activeRanges(layers, layout, 8)
+	-- content in columns 100..101, reach 8, plus the coarse-blur context
+	t.eq(active[1][1], 100 - 8 - simulate.CONTEXT)
+	t.eq(active[1][2], 102 + 8 + simulate.CONTEXT)
+	local ranges = { a = 5 }
+	local full = simulate.evaluate(layers, layout, { ranges = ranges, vertical = 0 }, RREF)
+	local merged = simulate.staticHist(layers, layout, RREF, active)
+	risk.merge(merged, simulate.groupHist(layers, layout, 1, ranges, 0, RREF, active))
+	t.eq(merged.n, full.hist.n)
+	t.near(risk.percentile(merged, 0.99), risk.percentile(full.hist, 0.99), 0.02 * RREF)
+end)
+
 t.test("simulate: group + static histograms match the full evaluation", function()
 	local layers, layout = fixture()
 	local ranges = { a = 5 }

@@ -10,6 +10,8 @@ local color = require("./color.luau")
 local rf = buffer.readf32
 local wu8, ru8 = buffer.writeu8, buffer.readu8
 
+local budget = require("./budget.luau")
+
 local M = {}
 
 local function smoothstep(e0, e1, x)
@@ -27,6 +29,9 @@ function M.ghostGray(E, eRef: number)
 	local out = image.new(E.w, E.h)
 	local inv = 1 / math.max(eRef, 1e-9)
 	for o = 0, (E.w * E.h - 1) * 4, 4 do
+		if o % 4096 == 0 then
+			budget.check()
+		end
 		local e = math.clamp(rf(E.data, o) * inv, 0, 1)
 		buffer.writef32(out.data, o, (0.60 - 0.40 * e ^ 0.8) * 0.72)
 	end
@@ -39,11 +44,17 @@ function M.glow(base, R, rTop: number, ramp)
 	local t = image.new(w, h)
 	local inv = 1 / math.max(rTop, 1e-9)
 	for o = 0, (w * h - 1) * 4, 4 do
+		if o % 4096 == 0 then
+			budget.check()
+		end
 		buffer.writef32(t.data, o, math.clamp(rf(R.data, o) * inv, 0, 1))
 	end
 	local bloom = image.gauss3(t, 1)
 	local out = ppm.new(w, h)
 	for i = 0, w * h - 1 do
+		if i % 1024 == 0 then
+			budget.check()
+		end
 		local o = i * 4
 		local tt = math.min(rf(t.data, o) + 0.35 * rf(bloom.data, o), 1)
 		local a = smoothstep(0.16, 0.55, tt)
@@ -67,6 +78,9 @@ function M.riskView(lum, R, rTop: number, ramp)
 	local out = ppm.new(w, h)
 	local inv = 1 / math.max(rTop, 1e-9)
 	for i = 0, w * h - 1 do
+		if i % 1024 == 0 then
+			budget.check()
+		end
 		local o = i * 4
 		local tr = math.clamp(rf(R.data, o) * inv, 0, 1) ^ 0.7
 		local a = math.clamp(1.4 * tr, 0, 1)
@@ -83,6 +97,9 @@ end
 function M.fromLinear(lin)
 	local out = ppm.new(lin.w, lin.h)
 	for i = 0, lin.w * lin.h - 1 do
+		if i % 1024 == 0 then
+			budget.check()
+		end
 		local o, d = i * 4, i * 3
 		wu8(out.data, d, color.to8(color.fromLinear(rf(lin.r.data, o))))
 		wu8(out.data, d + 1, color.to8(color.fromLinear(rf(lin.g.data, o))))
@@ -97,6 +114,7 @@ function M.scaleDown(img, newW: number)
 	local newH = math.max(1, math.floor(img.h / f + 0.5))
 	local out = ppm.new(newW, newH)
 	for oy = 0, newH - 1 do
+		budget.check()
 		local sy0 = math.floor(oy * f)
 		local sy1 = math.max(sy0 + 1, math.min(math.floor((oy + 1) * f), img.h))
 		for ox = 0, newW - 1 do
@@ -144,6 +162,7 @@ function M.zoom(img, x0: number, x1: number, y0: number, y1: number, z: number)
 	local w, h = (x1 - x0) * z, (y1 - y0) * z
 	local out = ppm.new(w, h)
 	for y = 0, h - 1 do
+		budget.check()
 		local sy = y0 + y // z
 		for x = 0, w - 1 do
 			buffer.copy(out.data, (y * w + x) * 3, img.data, (sy * img.w + x0 + x // z) * 3, 3)

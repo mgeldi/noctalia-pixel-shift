@@ -5,6 +5,8 @@ export type Rgb8 = { w: number, h: number, data: buffer }
 
 local ru8, wu8 = buffer.readu8, buffer.writeu8
 
+local budget = require("./budget.luau")
+
 local M = {}
 
 function M.new(w: number, h: number): Rgb8
@@ -83,6 +85,7 @@ end
 function M.transpose(img: Rgb8): Rgb8
 	local out = M.new(img.h, img.w)
 	for y = 0, img.h - 1 do
+		budget.check()
 		for x = 0, img.w - 1 do
 			buffer.copy(out.data, (x * out.w + y) * 3, img.data, (y * img.w + x) * 3, 3)
 		end

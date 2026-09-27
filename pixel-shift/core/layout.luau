@@ -6,6 +6,8 @@
 local image = require("./image.luau")
 local wear = require("./wear.luau")
 
+local budget = require("./budget.luau")
+
 local M = {}
 
 M.DIFF = 0.02 -- linear luma change that counts as "changed"
@@ -35,6 +37,9 @@ end
 function M.dynamicColumns(a, b, y0, y1)
 	local set = {}
 	for x = 0, a.w - 1 do
+		if x % 64 == 0 then
+			budget.check()
+		end
 		for y = y0, y1 - 1 do
 			if math.abs(image.get(a, x, y) - image.get(b, x, y)) > M.DIFF then
 				set[x] = true
@@ -48,14 +53,20 @@ end
 -- Best shift s in [-maxShift, maxShift] with probe(x + s) ~ base(x) over
 -- columns [x0, x1). Returns s, its mean absolute difference, and the one at s = 0.
 function M.matchShift(base, probe, x0, x1, y0, y1, maxShift, ignore)
+	local w = base.w
+	local bd, pd = base.data, probe.data
+	local rf = buffer.readf32
 	local best, bestS, zero = math.huge, 0, nil
 	for s = -maxShift, maxShift do
 		local sum, n = 0, 0
 		for x = x0, x1 - 1 do
+			if x % 32 == 0 then
+				budget.check()
+			end
 			local px = x + s
-			if px >= 0 and px < base.w and not (ignore[x] or ignore[px]) then
+			if px >= 0 and px < w and not (ignore[x] or ignore[px]) then
 				for y = y0, y1 - 1 do
-					sum += math.abs(image.get(base, x, y) - image.get(probe, px, y))
+					sum += math.abs(rf(bd, (y * w + x) * 4) - rf(pd, (y * w + px) * 4))
 				end
 				n += 1
 			end
@@ -96,6 +107,7 @@ function M.build(opts)
 		slots[slot] = { moves = false }
 		local cols = table.create(w, 0)
 		for y = y0, y1 - 1 do
+			budget.check()
 			for x = 0, w - 1 do
 				local d = math.abs(image.get(base, x, y) - image.get(probe, x, y))
 				if d > M.DIFF then
@@ -209,6 +221,9 @@ local function edgeLine(chan, y0, y1)
 	local mt, mb = table.create(w, 0), table.create(w, 0)
 	local win = {}
 	for x = 0, w - 1 do
+		if x % 64 == 0 then
+			budget.check()
+		end
 		table.clear(win)
 		for k = math.max(x - M.MEDIAN_R, 0), math.min(x + M.MEDIAN_R, w - 1) do
 			table.insert(win, top[k + 1])
@@ -241,6 +256,7 @@ function M.background(lin, l, diff)
 
 	for _, g in ipairs(l.groups) do
 		for y = y0, y1 - 1 do
+			budget.check()
 			for x = math.max(g.x0, 0), math.min(g.x1, w) - 1 do
 				local dev = 0
 				for c = 1, 3 do
@@ -256,6 +272,7 @@ function M.background(lin, l, diff)
 	-- dilate by one column so anti-aliased fringes count as content
 	local content = image.copy(raw)
 	for y = y0, y1 - 1 do
+		budget.check()
 		for x = 0, w - 1 do
 			if image.get(raw, x, y) > 0 then
 				if x > 0 then
@@ -269,6 +286,7 @@ function M.background(lin, l, diff)
 	end
 
 	for y = y0, y1 - 1 do
+		budget.check()
 		local x = 0
 		while x < w do
 			if image.get(content, x, y) > 0 then
@@ -322,6 +340,7 @@ function M.verify(l, baseL, bgL, actualL)
 	end
 	local err, mass = 0, 0
 	for y = l.barRows[1], l.barRows[2] - 1 do
+		budget.check()
 		for x = 0, baseL.w - 1 do
 			local c = image.get(contentL, x, y)
 			if image.get(owned, x, 0) == 0 then

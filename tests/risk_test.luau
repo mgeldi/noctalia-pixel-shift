@@ -17,6 +17,15 @@ t.test("risk: reference equals the analytic line response", function()
 	t.near(risk.reference(wear.PROFILES.generic), expected, 1e-4)
 end)
 
+t.test("risk: closed-form reference matches the measured line response", function()
+	local p = wear.PROFILES.qdoled
+	local E = image.new(128, 42)
+	for x = 0, 127 do image.set(E, x, 20, wear.white(p)) end
+	t.near(risk.reference(p), image.get(risk.map(E), 64, 20), 1e-4)
+	t.near(risk.centerWeight(1), 7 / 27, 1e-12)
+	t.near(risk.centerWeight(10), 331 / 9261, 1e-12)
+end)
+
 t.test("risk: histogram percentile and score", function()
 	local R = image.new(100, 1)
 	for x = 0, 99 do image.set(R, x, 0, x) end

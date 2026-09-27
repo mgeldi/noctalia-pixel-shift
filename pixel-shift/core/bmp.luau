@@ -1,6 +1,8 @@
 --!nonstrict
 -- 24-bit uncompressed BMP encoder (bottom-up rows, 4-byte row padding).
 
+local budget = require("./budget.luau")
+
 local M = {}
 
 function M.encode(img): string
@@ -22,6 +24,7 @@ function M.encode(img): string
 	buffer.writei32(b, 42, 2835)
 	local src = img.data
 	for y = 0, h - 1 do
+		budget.check()
 		local dst = 54 + (h - 1 - y) * rowSize
 		for x = 0, w - 1 do
 			local s = (y * w + x) * 3

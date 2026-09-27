@@ -5,6 +5,7 @@
 
 local image = require("./image.luau")
 local risk = require("./risk.luau")
+local budget = require("./budget.luau")
 
 local M = {}
 
@@ -71,10 +72,55 @@ function M.evaluate(layers, layout, strategy: Strategy, rref: number)
 	return { E = E, R = R, hist = h, score = risk.score(h, rref) }
 end
 
--- Risk histogram over one group's ownership columns, computed on a window.
-function M.groupHist(layers, layout, gi: number, ranges, V: number, rref: number)
+-- Columns of each group whose risk can depend on the strategy: its actual
+-- content (|dw| above a tiny threshold) widened by `reach` (the largest shift)
+-- plus the coarse blur context, clipped to the ownership range. Everything
+-- outside these ranges sees only the static background.
+function M.activeRanges(layers, layout, reach: number)
+	local dw = layers.dw
+	local rf = buffer.readf32
+	local out = {}
+	for gi, g in ipairs(layout.groups) do
+		local c0, c1 = nil, nil
+		for x = math.max(g.x0, 0), math.min(g.x1, dw.w) - 1 do
+			if x % 64 == 0 then
+				budget.check()
+			end
+			for y = 0, dw.h - 1 do
+				if math.abs(rf(dw.data, (y * dw.w + x) * 4)) > 1e-4 then
+					c0 = c0 or x
+					c1 = x + 1
+					break
+				end
+			end
+		end
+		if c0 then
+			out[gi] = { math.max(g.own0, c0 - reach - M.CONTEXT), math.min(g.own1, c1 + reach + M.CONTEXT) }
+		else
+			out[gi] = { g.own0, g.own0 }
+		end
+	end
+	return out
+end
+
+local function rangeOf(layout, gi, active)
+	if active then
+		return active[gi][1], active[gi][2]
+	end
 	local g = layout.groups[gi]
-	local a, b = g.own0 - M.CONTEXT, g.own1 + M.CONTEXT
+	return g.own0, g.own1
+end
+
+-- Risk histogram over one group's columns (its active range, or its whole
+-- ownership range without `active`), computed on a window around them.
+function M.groupHist(layers, layout, gi: number, ranges, V: number, rref: number, active)
+	local g = layout.groups[gi]
+	local h = risk.newHist(2 * rref)
+	local a0, a1 = rangeOf(layout, gi, active)
+	if a1 <= a0 then
+		return h
+	end
+	local a, b = a0 - M.CONTEXT, a1 + M.CONTEXT
 	local E = image.crop(layers.wbg, a, b, "clamp")
 	local dw = image.crop(layers.dw, a, b)
 	local content = groupContent(dw, g.x0 - a, g.x1 - a, M.kernels(g, ranges))
@@ -84,23 +130,32 @@ function M.groupHist(layers, layout, gi: number, ranges, V: number, rref: number
 	end
 	image.add(E, content)
 	local R = risk.map(E)
-	local h = risk.newHist(2 * rref)
-	risk.accumulate(h, R, layout.scoreRows[1], layout.scoreRows[2], g.own0 - a, g.own1 - a)
+	risk.accumulate(h, R, layout.scoreRows[1], layout.scoreRows[2], a0 - a, a1 - a)
 	return h
 end
 
--- Histogram of every column no group owns. Strategy-independent: nothing
--- there moves horizontally, and vertical shift only moves group content.
-function M.staticHist(layers, layout, rref: number)
+-- Histogram of every column outside the groups' (active) ranges. Those
+-- columns only ever see the static background, whatever the strategy.
+function M.staticHist(layers, layout, rref: number, active)
 	local R = risk.map(layers.wbg)
 	local h = risk.newHist(2 * rref)
 	local y0, y1 = layout.scoreRows[1], layout.scoreRows[2]
-	local cursor = 0
-	for _, g in ipairs(layout.groups) do
-		if g.own0 > cursor then
-			risk.accumulate(h, R, y0, y1, cursor, g.own0)
+	local spans = {}
+	for gi = 1, #layout.groups do
+		local a0, a1 = rangeOf(layout, gi, active)
+		if a1 > a0 then
+			table.insert(spans, { a0, a1 })
 		end
-		cursor = math.max(cursor, g.own1)
+	end
+	table.sort(spans, function(p, q)
+		return p[1] < q[1]
+	end)
+	local cursor = 0
+	for _, sp in ipairs(spans) do
+		if sp[1] > cursor then
+			risk.accumulate(h, R, y0, y1, cursor, sp[1])
+		end
+		cursor = math.max(cursor, sp[2])
 	end
 	if cursor < R.w then
 		risk.accumulate(h, R, y0, y1, cursor, R.w)

@@ -3,24 +3,35 @@
 -- slot; the engine service decides every width, this entry only draws it.
 
 local id = nil
+local output = nil -- barWidget.outputName() is nil inside state watchers, so keep it
 local width = 0
 local known = false
 local lastHello = -math.huge
 
--- Widgets load one after another in bar order, so a per-output counter gives
--- each spacer the same id on every start.
+-- Widgets load one after another in bar order, and the shell recreates all
+-- of them together (start-up, config reload, plugin reload). Spacers created
+-- within WAVE_MS of each other form one wave and are numbered from 1 in load
+-- order, so every spacer gets the same id again after each recreation.
+local WAVE_MS = 1500
+
 local function ensureId(): boolean
 	if id then
 		return true
 	end
-	local output = barWidget.outputName()
+	output = barWidget.outputName()
 	if not output then
 		return false
 	end
-	local key = "spacer:count:" .. output
-	local n = (noctalia.state.get(key) or 0) + 1
-	noctalia.state.set(key, n)
-	id = `{output}#{n}`
+	local key = "spacer:wave:" .. output
+	local now = noctalia.nowMs()
+	local wave = noctalia.state.get(key)
+	if type(wave) ~= "table" or now - (wave.at or 0) > WAVE_MS then
+		wave = { at = now, n = 0 }
+	end
+	wave.n += 1
+	wave.at = now
+	noctalia.state.set(key, wave)
+	id = `{output}#{wave.n}`
 	return true
 end
 
@@ -38,7 +49,7 @@ local function hello()
 		return
 	end
 	lastHello = os.time()
-	noctalia.state.set("spacer:hello", { id = id, output = barWidget.outputName(), vertical = barWidget.isVertical() })
+	noctalia.state.set("spacer:hello", { id = id, output = output, vertical = barWidget.isVertical() })
 end
 
 noctalia.state.watch("spacers:known", function(v)

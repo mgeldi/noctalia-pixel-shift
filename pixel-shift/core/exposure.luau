@@ -6,6 +6,8 @@
 local image = require("./image.luau")
 local wear = require("./wear.luau")
 
+local budget = require("./budget.luau")
+
 local M = {}
 M.MAGIC = "PSX1"
 local HEADER = "<c4I4I4I4dd"
@@ -25,6 +27,9 @@ function M.isBlank(img): boolean
 	local n = img.w * img.h
 	local bright = 0
 	for i = 0, n - 1 do
+		if i % 1024 == 0 then
+			budget.check()
+		end
 		local o = i * 3
 		if buffer.readu8(d, o) > 12 or buffer.readu8(d, o + 1) > 12 or buffer.readu8(d, o + 2) > 12 then
 			bright += 1
@@ -39,6 +44,7 @@ end
 function M.matchesBaseline(capL, baseL, layout, tol: number?): boolean
 	local sum, n = 0, 0
 	for y = layout.barRows[1], layout.barRows[2] - 1 do
+		budget.check()
 		for x = 0, baseL.w - 1 do
 			sum += math.abs(image.get(capL, x, y) - image.get(baseL, x, y))
 			n += 1
@@ -109,6 +115,7 @@ function M.layers(acc, name: string, scan, layout)
 	local dw = image.new(mean.w, mean.h)
 	for _, g in ipairs(layout.groups) do
 		for y = 0, mean.h - 1 do
+			budget.check()
 			for x = math.max(g.x0, 0), math.min(g.x1, mean.w) - 1 do
 				local b = image.get(scan.wbg, x, y)
 				image.set(wbg, x, y, b)

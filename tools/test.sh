@@ -6,6 +6,7 @@ set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 luau="${LUAU:-$root/.tools/bin/luau}"
 command -v "$luau" >/dev/null 2>&1 || luau="luau"
+python3 "$root/tools/check-kernels.py"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cp -r "$root/tests" "$root/pixel-shift" "$tmp/"

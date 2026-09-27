@@ -6,6 +6,7 @@
 
 local simulate = require("./simulate.luau")
 local risk = require("./risk.luau")
+local budget = require("./budget.luau")
 
 local M = {}
 
@@ -78,7 +79,7 @@ function Opt:_groupHist(gi, ranges, V)
 	local key = `{gi}|{simulate.kernelKey(simulate.kernels(g, ranges))}|{simulate.vRows(layout, V)}`
 	local h = self.cache[key]
 	if not h then
-		h = simulate.groupHist(self.ctx.layers, layout, gi, ranges, V, self.ctx.rref)
+		h = simulate.groupHist(self.ctx.layers, layout, gi, ranges, V, self.ctx.rref, self.active)
 		self.cache[key] = h
 		self.evals += 1
 		coroutine.yield()
@@ -87,6 +88,7 @@ function Opt:_groupHist(gi, ranges, V)
 end
 
 function Opt:_score(ranges, V)
+	budget.check() -- cached scores come back to back; give the host a turn
 	local total = risk.newHist(2 * self.ctx.rref)
 	risk.merge(total, self.static)
 	for gi = 1, #self.ctx.layout.groups do
@@ -145,7 +147,14 @@ function Opt:_descend(B, V, start)
 end
 
 function Opt:_run()
-	self.static = simulate.staticHist(self.ctx.layers, self.ctx.layout, self.ctx.rref)
+	local fmax = 0
+	for _, g in ipairs(self.ctx.layout.groups) do
+		for _, f in pairs(g.factors) do
+			fmax = math.max(fmax, math.abs(f))
+		end
+	end
+	self.active = simulate.activeRanges(self.ctx.layers, self.ctx.layout, math.ceil(self.ctx.maxShift * fmax) + 2)
+	self.static = simulate.staticHist(self.ctx.layers, self.ctx.layout, self.ctx.rref, self.active)
 	coroutine.yield()
 	local total = #self.vs * #self.budgets
 	local finished = 0

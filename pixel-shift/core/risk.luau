@@ -5,7 +5,9 @@
 local image = require("./image.luau")
 local wear = require("./wear.luau")
 
-local rf, wf = buffer.readf32, buffer.writef32
+
+local budget = require("./budget.luau")
+local K = require("./kernels.luau")
 
 local M = {}
 
@@ -20,24 +22,26 @@ function M.map(E: image.Image): image.Image
 	local g1 = image.gauss3(E, M.FINE_R)
 	local g2 = image.gauss3(E, M.COARSE_R)
 	local R = image.new(E.w, E.h)
-	local e, a, b, r = E.data, g1.data, g2.data, R.data
-	local cw = M.COARSE_W
-	for o = 0, (E.w * E.h - 1) * 4, 4 do
-		local v = rf(e, o)
-		wf(r, o, math.abs(v - rf(a, o)) + cw * math.abs(v - rf(b, o)))
-	end
+	K.riskCombine(E.data, g1.data, g2.data, R.data, E.w * E.h * 4, M.COARSE_W)
 	return R
 end
 
+-- Centre weight of three passes of a (2r+1) box: the number of ways three
+-- offsets in [-r, r] sum to zero, over (2r+1)^3.
+function M.centerWeight(r: number): number
+	return (3 * r * r + 3 * r + 1) / (2 * r + 1) ^ 3
+end
+
 -- Risk of a 1 px pure-white line on black without shifting: the 100 mark.
+-- Closed form of risk.map on that line (horizontal passes leave it alone).
 function M.reference(p): number
-	local w, h = 128, 42
-	local E = image.new(w, h)
-	local v = wear.white(p)
-	for x = 0, w - 1 do
-		image.set(E, x, 20, v)
-	end
-	return image.get(M.map(E), w // 2, 20)
+	local w = wear.white(p)
+	return w * ((1 - M.centerWeight(M.FINE_R)) + M.COARSE_W * (1 - M.centerWeight(M.COARSE_R)))
+end
+
+-- The engine installs its fast copy of the kernels (see kernels.luau).
+function M.install(kernels)
+	K = kernels
 end
 
 function M.newHist(cap: number): Hist
@@ -50,15 +54,9 @@ function M.accumulate(h: Hist, R: image.Image, y0: number, y1: number, x0: numbe
 	local top = M.BINS - 1
 	local a, b = math.max(x0, 0), math.min(x1, R.w)
 	for y = math.max(y0, 0), math.min(y1, R.h) - 1 do
-		local row = y * R.w
-		for x = a, b - 1 do
-			local i = math.floor(rf(R.data, (row + x) * 4) * scale)
-			if i > top then
-				i = top
-			elseif i < 0 then
-				i = 0
-			end
-			bins[i + 1] += 1
+		budget.check()
+		if b > a then
+			K.histogram(bins, R.data, (y * R.w + a) * 4, b - a, scale, top)
 		end
 		h.n += math.max(b - a, 0)
 	end
@@ -66,10 +64,7 @@ end
 
 function M.merge(dst: Hist, src: Hist)
 	assert(dst.cap == src.cap, "histogram caps differ")
-	local d, s = dst.bins, src.bins
-	for i = 1, M.BINS do
-		d[i] += s[i]
-	end
+	K.mergeBins(dst.bins, src.bins, M.BINS)
 	dst.n += src.n
 end
 

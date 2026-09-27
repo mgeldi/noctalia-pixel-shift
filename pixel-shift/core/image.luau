@@ -7,6 +7,9 @@ export type LinearRGB = { w: number, h: number, r: Image, g: Image, b: Image }
 
 local rf, wf = buffer.readf32, buffer.writef32
 
+local budget = require("./budget.luau")
+local K = require("./kernels.luau")
+
 local M = {}
 
 function M.new(w: number, h: number): Image
@@ -64,75 +67,53 @@ function M.maskColumns(img: Image, x0: number, x1: number): Image
 	return out
 end
 
+-- The hot loops live in kernels.luau; the engine swaps in its own fast copy
+-- (see there for why).
+function M.install(kernels)
+	K = kernels
+end
+
 -- dst += src * scale
 function M.add(dst: Image, src: Image, scale: number?)
-	local s = scale or 1
-	local d, sd = dst.data, src.data
-	for o = 0, (dst.w * dst.h - 1) * 4, 4 do
-		wf(d, o, rf(d, o) + rf(sd, o) * s)
-	end
+	K.add(dst.data, src.data, dst.w * dst.h * 4, scale or 1)
 end
 
 function M.square(img: Image): Image
 	local out = M.new(img.w, img.h)
 	local s, d = img.data, out.data
-	for o = 0, (img.w * img.h - 1) * 4, 4 do
+	local n = img.w * img.h * 4
+	local o = 0
+	while o + 28 < n do
+		if o % 4096 == 0 then
+			budget.check()
+		end
+		local a, b, c, e = rf(s, o), rf(s, o + 4), rf(s, o + 8), rf(s, o + 12)
+		wf(d, o, a * a)
+		wf(d, o + 4, b * b)
+		wf(d, o + 8, c * c)
+		wf(d, o + 12, e * e)
+		a, b, c, e = rf(s, o + 16), rf(s, o + 20), rf(s, o + 24), rf(s, o + 28)
+		wf(d, o + 16, a * a)
+		wf(d, o + 20, b * b)
+		wf(d, o + 24, c * c)
+		wf(d, o + 28, e * e)
+		o += 32
+	end
+	while o < n do
 		local v = rf(s, o)
 		wf(d, o, v * v)
+		o += 4
 	end
 	return out
 end
 
 -- Centred box of radius r with replicated edges.
 function M.hbox(src: Image, dst: Image, r: number)
-	local w, h = src.w, src.h
-	local s, d = src.data, dst.data
-	local inv = 1 / (2 * r + 1)
-	for y = 0, h - 1 do
-		local row = y * w
-		local acc = 0
-		for k = -r, r do
-			local x = if k < 0 then 0 elseif k >= w then w - 1 else k
-			acc += rf(s, (row + x) * 4)
-		end
-		for x = 0, w - 1 do
-			wf(d, (row + x) * 4, acc * inv)
-			local xo = x - r
-			if xo < 0 then
-				xo = 0
-			end
-			local xi = x + r + 1
-			if xi >= w then
-				xi = w - 1
-			end
-			acc += rf(s, (row + xi) * 4) - rf(s, (row + xo) * 4)
-		end
-	end
+	K.hbox(src.data, dst.data, src.w, src.h, r)
 end
 
 function M.vbox(src: Image, dst: Image, r: number)
-	local w, h = src.w, src.h
-	local s, d = src.data, dst.data
-	local inv = 1 / (2 * r + 1)
-	for x = 0, w - 1 do
-		local acc = 0
-		for k = -r, r do
-			local y = if k < 0 then 0 elseif k >= h then h - 1 else k
-			acc += rf(s, (y * w + x) * 4)
-		end
-		for y = 0, h - 1 do
-			wf(d, (y * w + x) * 4, acc * inv)
-			local yo = y - r
-			if yo < 0 then
-				yo = 0
-			end
-			local yi = y + r + 1
-			if yi >= h then
-				yi = h - 1
-			end
-			acc += rf(s, (yi * w + x) * 4) - rf(s, (yo * w + x) * 4)
-		end
-	end
+	K.vbox(src.data, dst.data, src.w, src.h, r)
 end
 
 -- Gaussian approximation: three passes of a (2r+1) box in each direction.
@@ -154,32 +135,7 @@ function M.dirBoxH(src: Image, range: number, dir: number): Image
 		return M.copy(src)
 	end
 	local out = M.new(src.w, src.h)
-	local w, h = src.w, src.h
-	local s, d = src.data, out.data
-	local inv = 1 / (range + 1)
-	for y = 0, h - 1 do
-		local row = y * w
-		local acc = 0
-		if dir >= 0 then
-			for x = 0, w - 1 do
-				acc += rf(s, (row + x) * 4)
-				local xo = x - range - 1
-				if xo >= 0 then
-					acc -= rf(s, (row + xo) * 4)
-				end
-				wf(d, (row + x) * 4, acc * inv)
-			end
-		else
-			for x = w - 1, 0, -1 do
-				acc += rf(s, (row + x) * 4)
-				local xo = x + range + 1
-				if xo < w then
-					acc -= rf(s, (row + xo) * 4)
-				end
-				wf(d, (row + x) * 4, acc * inv)
-			end
-		end
-	end
+	K.dirBoxH(src.data, out.data, src.w, src.h, range, dir)
 	return out
 end
 
@@ -189,31 +145,7 @@ function M.dirBoxV(src: Image, range: number, dir: number): Image
 		return M.copy(src)
 	end
 	local out = M.new(src.w, src.h)
-	local w, h = src.w, src.h
-	local s, d = src.data, out.data
-	local inv = 1 / (range + 1)
-	for x = 0, w - 1 do
-		local acc = 0
-		if dir >= 0 then
-			for y = 0, h - 1 do
-				acc += rf(s, (y * w + x) * 4)
-				local yo = y - range - 1
-				if yo >= 0 then
-					acc -= rf(s, (yo * w + x) * 4)
-				end
-				wf(d, (y * w + x) * 4, acc * inv)
-			end
-		else
-			for y = h - 1, 0, -1 do
-				acc += rf(s, (y * w + x) * 4)
-				local yo = y + range + 1
-				if yo < h then
-					acc -= rf(s, (yo * w + x) * 4)
-				end
-				wf(d, (y * w + x) * 4, acc * inv)
-			end
-		end
-	end
+	K.dirBoxV(src.data, out.data, src.w, src.h, range, dir)
 	return out
 end
 
@@ -225,6 +157,7 @@ function M.shiftColumns(img: Image, x0: number, x1: number, dx: number): Image
 	end
 	local w = img.w
 	for y = 0, img.h - 1 do
+		budget.check()
 		for x = math.max(x0, 0), math.min(x1, w) - 1 do
 			local sx = x + dx
 			if sx < 0 then
@@ -259,6 +192,7 @@ function M.percentile(img: Image, q: number, y0: number?, y1: number?): number
 	local a, b = y0 or 0, y1 or img.h
 	local lo, hi = math.huge, -math.huge
 	for y = a, b - 1 do
+		budget.check()
 		for x = 0, img.w - 1 do
 			local v = rf(img.data, (y * img.w + x) * 4)
 			if v < lo then
@@ -277,6 +211,7 @@ function M.percentile(img: Image, q: number, y0: number?, y1: number?): number
 	local scale = bins / (hi - lo)
 	local n = 0
 	for y = a, b - 1 do
+		budget.check()
 		for x = 0, img.w - 1 do
 			local i = math.floor((rf(img.data, (y * img.w + x) * 4) - lo) * scale)
 			if i >= bins then
@@ -309,8 +244,21 @@ end
 function M.luma(lin: LinearRGB): Image
 	local out = M.new(lin.w, lin.h)
 	local r, g, b, d = lin.r.data, lin.g.data, lin.b.data, out.data
-	for o = 0, (lin.w * lin.h - 1) * 4, 4 do
+	local n = lin.w * lin.h * 4
+	local o = 0
+	while o + 12 < n do
+		if o % 4096 == 0 then
+			budget.check()
+		end
 		wf(d, o, 0.2126 * rf(r, o) + 0.7152 * rf(g, o) + 0.0722 * rf(b, o))
+		wf(d, o + 4, 0.2126 * rf(r, o + 4) + 0.7152 * rf(g, o + 4) + 0.0722 * rf(b, o + 4))
+		wf(d, o + 8, 0.2126 * rf(r, o + 8) + 0.7152 * rf(g, o + 8) + 0.0722 * rf(b, o + 8))
+		wf(d, o + 12, 0.2126 * rf(r, o + 12) + 0.7152 * rf(g, o + 12) + 0.0722 * rf(b, o + 12))
+		o += 16
+	end
+	while o < n do
+		wf(d, o, 0.2126 * rf(r, o) + 0.7152 * rf(g, o) + 0.0722 * rf(b, o))
+		o += 4
 	end
 	return out
 end

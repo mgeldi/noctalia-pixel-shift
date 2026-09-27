@@ -8,6 +8,8 @@ local color = require("./color.luau")
 
 local rf, wf = buffer.readf32, buffer.writef32
 
+local budget = require("./budget.luau")
+
 local M = {}
 
 M.N = 1.6
@@ -46,6 +48,9 @@ function M.linearFromRgb8(img): image.LinearRGB
 	local src = img.data
 	local rd, gd, bd = lin.r.data, lin.g.data, lin.b.data
 	for i = 0, img.w * img.h - 1 do
+		if i % 1024 == 0 then
+			budget.check()
+		end
 		local s, o = i * 3, i * 4
 		wf(rd, o, color.toLinear8(buffer.readu8(src, s)))
 		wf(gd, o, color.toLinear8(buffer.readu8(src, s + 1)))
@@ -58,6 +63,9 @@ function M.map(p, lin: image.LinearRGB): image.Image
 	local out = image.new(lin.w, lin.h)
 	local rd, gd, bd, d = lin.r.data, lin.g.data, lin.b.data, out.data
 	for o = 0, (lin.w * lin.h - 1) * 4, 4 do
+		if o % 4096 == 0 then
+			budget.check()
+		end
 		wf(d, o, M.pixel(p, rf(rd, o), rf(gd, o), rf(bd, o)))
 	end
 	return out
