@@ -1,0 +1,4 @@
+.superpowers/
+.playwright-mcp/
+*.ppm
+/scratch/
