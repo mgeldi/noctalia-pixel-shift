@@ -30,11 +30,12 @@ t.test("hotspots: causes", function()
 	local byX = {}
 	for _, h in ipairs(list) do byX[h.x0] = h end
 	t.eq(#list, 4, "capped at MAX")
-	t.eq(list[1].cause, "outside")
+	t.eq(list[1].cause, "wide", "actionable hotspots come first")
+	t.ok(byX[200] == nil, "outside-the-bar hotspot drops off a full list")
 	t.eq(byX[20].cause, "wide")
 	t.eq(byX[100].cause, "horizontal")
 	t.eq(byX[180].cause, "bright")
-	t.near(list[1].peak, 95, 1e-4)
+	t.near(list[1].peak, 90, 1e-4)
 	t.eq(byX[20].side, "left")
 end)
 

@@ -18,7 +18,7 @@ M.VAR_DYNAMIC = 0.002 -- luma variance across samples
 local function regionsIn(R, thr, y0, y1, outside, out)
 	local cur
 	for x = 0, R.w - 1 do
-		if x % 64 == 0 then
+		if x % 16 == 0 then
 			budget.check()
 		end
 		local hot = false
@@ -42,6 +42,7 @@ end
 local function refine(reg, R, thr)
 	local peak, ry0, ry1 = 0, math.huge, -1
 	for y = reg.y0, reg.y1 - 1 do
+		budget.check()
 		for x = reg.x0, reg.x1 - 1 do
 			local v = image.get(R, x, y)
 			if v > peak then
@@ -70,6 +71,7 @@ local function longestRun(dw, reg, thr)
 	local best = 0
 	local a, b = math.max(reg.x0 - 40, 0), math.min(reg.x1 + 40, dw.w)
 	for y = reg.y0, reg.y1 - 1 do
+		budget.check()
 		local run = 0
 		for x = a, b - 1 do
 			if image.get(dw, x, y) > thr then
@@ -86,6 +88,7 @@ end
 local function gradients(R, reg)
 	local gx, gy = 0, 0
 	for y = math.max(reg.y0 - 1, 0), math.min(reg.y1, R.h - 1) - 1 do
+		budget.check()
 		for x = math.max(reg.x0 - 1, 0), math.min(reg.x1, R.w - 1) - 1 do
 			local v = image.get(R, x, y)
 			gx += math.abs(image.get(R, x + 1, y) - v)
@@ -98,6 +101,7 @@ end
 local function meanOver(img, reg, pred)
 	local sum, n = 0, 0
 	for y = reg.y0, reg.y1 - 1 do
+		budget.check()
 		for x = reg.x0, reg.x1 - 1 do
 			local v = image.get(img, x, y)
 			if pred == nil or pred(v) then
@@ -162,7 +166,12 @@ function M.find(opts)
 		reg.cause = cause(reg, opts)
 		reg.side = util.side((reg.x0 + reg.x1) / 2, R.w)
 	end
+	-- what the user can act on first; "outside the bar" goes last
 	table.sort(regions, function(a, b)
+		local ao, bo = a.cause == "outside", b.cause == "outside"
+		if ao ~= bo then
+			return bo
+		end
 		return a.peak > b.peak
 	end)
 	local out = {}

@@ -18,7 +18,7 @@ local M = {}
 
 M.OVERVIEW_W = 860
 M.INSPECT_W = 560
-M.INSPECT_MAX_H = 170
+M.INSPECT_MAX_H = 112
 
 local function hex(c)
 	return string.format("#%02x%02x%02x", c[1], c[2], c[3])
@@ -41,24 +41,26 @@ function M.evaluate(O, strategy)
 	return ev
 end
 
--- Label key for a spacer: the side of the group it moves, and for groups
--- moved by two spacers (the centre) which side the spacer sits on.
+-- Label key for a spacer: the side of the group it moves most. When that
+-- group is also moved the opposite way by another spacer (the centre pair),
+-- the label says which side of the centre this spacer sits on.
 function M.slotLabel(layout, slot): string
+	local best, bestF = nil, 0
 	for _, g in ipairs(layout.groups) do
 		local f = g.factors[slot]
-		if f then
-			local count = 0
-			for _ in pairs(g.factors) do
-				count += 1
-			end
-			local side = util.side(((g.c0 or g.own0) + (g.c1 or g.own1)) / 2, layout.w)
-			if count > 1 then
-				return if f > 0 then "center_l" else "center_r"
-			end
-			return side
+		if f and math.abs(f) > math.abs(bestF) + 1e-9 then
+			best, bestF = g, f
 		end
 	end
-	return "unknown"
+	if not best then
+		return "unknown"
+	end
+	for other, f in pairs(best.factors) do
+		if other ~= slot and f * bestF < 0 then
+			return if bestF > 0 then "center_l" else "center_r"
+		end
+	end
+	return util.side(((best.c0 or best.own0) + (best.c1 or best.own1)) / 2, layout.w)
 end
 
 local function sortedSlots(layout)
@@ -106,7 +108,9 @@ function M.build(O, ui, ctx)
 	local sel = spots[selected]
 
 	-- inspector region: centred on the selected hotspot (or the bar centre)
-	local zoom = math.clamp(M.INSPECT_MAX_H // layout.h, 1, 4)
+	-- the inspector shows the scored rows (the bar and its edge) only
+	local iy0, iy1 = layout.scoreRows[1], layout.scoreRows[2]
+	local zoom = math.clamp(M.INSPECT_MAX_H // (iy1 - iy0), 1, 4)
 	local regionW = M.INSPECT_W // zoom
 	local cx = if sel then (sel.x0 + sel.x1) // 2 else layout.w // 2
 	local rx0 = math.clamp(cx - regionW // 2, 0, math.max(layout.w - regionW, 0))
@@ -139,10 +143,10 @@ function M.build(O, ui, ctx)
 			pins = pins,
 		},
 		inspector = {
-			none = write("inspect-none", bmp.encode(render.zoom(fullNone, rx0, rx1, 0, layout.h, zoom))),
-			strategy = write("inspect-strategy", bmp.encode(render.zoom(fullStrat, rx0, rx1, 0, layout.h, zoom))),
+			none = write("inspect-none", bmp.encode(render.zoom(fullNone, rx0, rx1, iy0, iy1, zoom))),
+			strategy = write("inspect-strategy", bmp.encode(render.zoom(fullStrat, rx0, rx1, iy0, iy1, zoom))),
 			w = (rx1 - rx0) * zoom,
-			h = layout.h * zoom,
+			h = (iy1 - iy0) * zoom,
 			zoom = zoom,
 			n = if sel then selected else nil,
 		},
@@ -173,14 +177,6 @@ function M.build(O, ui, ctx)
 	if ctx.result then
 		local r = ctx.result
 		local c = optimize.curve(r.entries, r.budgets)
-		local top = math.max(evNone.score, 1)
-		local h, v = {}, {}
-		for i = 1, #r.budgets do
-			h[i] = math.clamp((c.h[i] or top) / (top * 1.05), 0, 1)
-			if c.v[i] then
-				v[i] = math.clamp(c.v[i] / (top * 1.05), 0, 1)
-			end
-		end
 		local pick = optimize.pick(r.entries, optimize.lambdaFromSlider(ctx.lambdaT), ctx.allowVertical and r.allowVertical)
 		local pickIndex = nil
 		for i, B in ipairs(r.budgets) do
@@ -188,13 +184,19 @@ function M.build(O, ui, ctx)
 				pickIndex = i
 			end
 		end
+		local h, v = {}, {}
+		for i = 1, #r.budgets do
+			h[i] = c.h[i] or evNone.score
+			v[i] = c.v[i] or false -- JSON-safe: no holes
+		end
 		data.curve = {
-			h = h,
-			v = if #v == #r.budgets then v else nil,
 			budgets = r.budgets,
+			h = h,
+			v = if c.v[1] then v else nil,
+			top = math.max(evNone.score, 1),
 			pick = pickIndex,
+			pickV = pick and pick.V or 0,
 			pickScore = pick and pick.score or nil,
-			pickLambdaT = ctx.lambdaT,
 		}
 		data.status = { at = r.at, evals = r.evals, seconds = r.seconds }
 	end

@@ -1008,6 +1008,22 @@ local function refreshOutputs()
 end
 
 -- lab -----------------------------------------------------------------------------
+-- An anchored centre widget pins the whole centre section, so the centre
+-- spacers cannot move it. Returns that widget's name for the lab's hint.
+local function anchoredCenterWidget(): string?
+	local bar = barInfo()
+	local center = noctalia.getSetting(`bar.{bar.name}.center`)
+	if type(center) ~= "table" then
+		return nil
+	end
+	for _, name in ipairs(center) do
+		if type(name) == "string" and noctalia.getSetting(`widget.{name}.anchor`) == true then
+			return name
+		end
+	end
+	return nil
+end
+
 local function renderLab()
 	local names = {}
 	for name in pairs(outputs) do
@@ -1038,6 +1054,7 @@ local function renderLab()
 		scanError = errors.scan,
 		grim = capture.available(),
 		spacerCount = count,
+		anchor = anchoredCenterWidget(),
 	}
 	local O = ui.output and outputs[ui.output]
 	if not dataDirty and lastData then
@@ -1232,6 +1249,9 @@ function onIpc(event, payload)
 	end
 	if event == "pause" or event == "resume" or event == "toggle" or event == "rescan" or event == "optimize" then
 		handle(event, payload)
+	elseif event == "view" or event == "mode" or event == "output" or event == "hotspot" then
+		handle(event, payload) -- drive the lab from scripts
+		dataDirty = true
 	elseif event == "lab" then
 		noctalia.togglePanel("mgeldi/pixel-shift:lab")
 	end
@@ -1328,6 +1348,7 @@ end
 if vertical.active() and not saved.allowVertical then
 	vertical.clear() -- stale file from a crash
 end
+noctalia.state.set("lab:model", nil) -- its image paths die with cleanRenders()
 store.cleanRenders()
 noctalia.state.set("paused", saved.paused)
 noctalia.state.set("engine:epoch", noctalia.nowMs())

@@ -55,6 +55,20 @@ local function luma(img)
 	return image.luma(wear.linearFromRgb8(img))
 end
 
+t.test("labmodel: spacer labels follow the group each spacer moves most", function()
+	local layout = {
+		w = 3840,
+		groups = {
+			{ c0 = 1640, c1 = 2200, own0 = 1000, own1 = 2800, factors = { a = 0.75, b = -0.75 } },
+			{ c0 = 2880, c1 = 3820, own0 = 2800, own1 = 3840, factors = { b = -0.75, c = -1.5 } },
+		},
+	}
+	t.eq(labmodel.slotLabel(layout, "a"), "center_l")
+	t.eq(labmodel.slotLabel(layout, "b"), "center_r")
+	t.eq(labmodel.slotLabel(layout, "c"), "right", "same-sign neighbours are not a centre pair")
+	t.eq(labmodel.slotLabel(layout, "zzz"), "unknown")
+end)
+
 t.test("labmodel: pipeline from captures to lab data", function()
 	local base = capture(0)
 	local lin = wear.linearFromRgb8(base)
@@ -107,7 +121,7 @@ t.test("labmodel: pipeline from captures to lab data", function()
 	t.ok(data.overview.left and data.overview.right and data.legend, "images written")
 	t.eq(data.overview.w, 860)
 	t.eq(#data.overview.pins, #data.hotspots)
-	t.eq(data.inspector.w, 560)
+	t.ok(data.inspector.w <= 560 and data.inspector.w >= 540, "inspector about 560 px wide (zoom times region)")
 	t.eq(#data.chips, 1)
 	t.eq(data.chips[1].slot, "left")
 	t.ok(data.curve ~= nil and data.curve.pick ~= nil, "curve with a pick")

@@ -68,10 +68,14 @@ function M.writeImage(slot: string, bytes: string): string?
 	if not noctalia.writeFile(name, bytes) then
 		return nil
 	end
-	if renders[slot] then
-		noctalia.removeFile(renders[slot])
+	-- keep the previous render too: the panel may still show it while the
+	-- new model is on its way
+	local list = renders[slot] or {}
+	renders[slot] = list
+	table.insert(list, name)
+	while #list > 2 do
+		noctalia.removeFile(table.remove(list, 1))
 	end
-	renders[slot] = name
 	return name
 end
 
