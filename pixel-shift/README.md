@@ -59,20 +59,23 @@ from the picture itself and skipped.
    ```
 
    - **Ghost** shows what the bar would leave on a flat grey screen after long use.
-     Hotspots glow in your theme colour, as bright as their risk.
-   - **Risk** and **Bar** show the risk map and the bar itself; **No shift** and
-     **Strategy** compare the two.
+     Hotspots glow in your theme colour, as bright as their risk. **Risk** and **Bar**
+     show the risk map and the bar itself. In the whole-bar view, **No shift** and
+     **With strategy** compare the two.
+   - **Visible burn-in risk** puts both results on one scale from 0 to 100, where 100
+     is a white line that never moves.
    - **Hotspots** are the places where the simulated ghost would still show with the
-     current strategy: the up to four strongest spots above 15 % of a white line that
-     never moves, strongest first. Each one shows the bar at that spot, a level
-     (high from 50 %, medium from 25 %, low below), its cause and what to change, for
-     example a solid fill wider than the shift range. The list also names spacers
-     that sit where they cannot move anything.
-   - **Strategy** shows the risk for every amount of movement. In **Auto** mode Pixel
-     Shift picks the point where more movement stops paying off; move the
-     **Calm ↔ Max protection** slider and press **Apply** to choose another point.
-     **Manual** sets each spacer's range yourself. **Revert** goes back to the
-     previous strategy.
+     current strategy: the up to four strongest spots above 15 of 100, strongest
+     first. Each row shows the bar at that spot, its cause and a level (high from 50,
+     medium from 25, low below). Selecting one frames it up close, before and after,
+     and says what to change, for example a solid fill wider than the shift range.
+     The list also names spacers that sit where they cannot move anything.
+   - **Strategy** shows the risk for every amount of movement and what runs on the
+     bar now. In **Auto** mode Pixel Shift picks the point where more movement stops
+     paying off; moving the **Calm ↔ Max protection** slider previews another point,
+     **Apply to bar** makes it live and **Discard** drops it. **Manual** sets each
+     spacer's range yourself. **Undo last apply** goes back to the strategy that was
+     live before.
 
 4. **Pause when you need a still bar.** Add the **Pixel Shift** tile in
    Settings → Control Center. A click pauses or resumes shifting; a right click opens
