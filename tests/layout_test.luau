@@ -42,6 +42,7 @@ t.test("layout: one spacer moving a cluster", function()
 	t.ok(g.x0 <= 40 and g.x1 >= 100, "group covers both positions")
 	t.eq(g.own0, 0); t.eq(g.own1, W)
 	t.eq(g.x1, W, "a right-moving group extends to its right boundary")
+	t.ok(g.c0 <= 40 and g.c1 >= 100 and g.c1 < W, "content extent kept before the extension")
 	t.eq(l.slots.a.moves, true)
 end)
 

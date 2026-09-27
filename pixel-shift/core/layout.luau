@@ -146,6 +146,7 @@ function M.build(opts)
 		bounds[i] = { left, right }
 	end
 	for i, g in ipairs(groups) do
+		g.c0, g.c1 = g.x0, g.x1 -- measured content extent, for labels
 		g.own0, g.own1 = bounds[i][1], bounds[i][2]
 		for _, f in pairs(g.factors) do
 			if f > 0 then
