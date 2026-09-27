@@ -133,22 +133,13 @@ for m in block.finditer(text):
     body, rel = m.group(1), m.group(2)
     if only and rel not in only:
         continue
+    content = body.split("\n", 1)[1]
+    if rel.startswith("pixel-shift/") and rel.endswith(".luau"):
+        # Noctalia requires explicit relative paths ending in .luau
+        content = re.sub(r'require\("(\.{1,2}/[^"]+?)(?<!\.luau)"\)', r'require("\1.luau")', content)
     target = root / rel
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(body.split("\n", 1)[1])
-    written += 1
-    print("wrote", rel)
-print(written, "files")
-```[a-z]*\n((?:# |// )?-- file: (\S+)\n.*?)```", re.S)
-written = 0
-for m in block.finditer(plan.read_text()):
-    body, rel = m.group(1), m.group(2)
-    if only and rel not in only:
-        continue
-    lines = body.split("\n", 1)[1]
-    target = root / rel
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(lines)
+    target.write_text(content)
     written += 1
     print("wrote", rel)
 print(written, "files")
