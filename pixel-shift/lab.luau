@@ -12,6 +12,7 @@ local render
 
 -- spacing rhythm (px): inside a group / between related parts / between regions
 local TIGHT, NEAR, REGION = 6, 12, 18
+local CLEAR = "#00000000"
 
 local function tr(key: string, subst): string
 	return noctalia.tr(key, subst)
@@ -102,9 +103,9 @@ local function pin(n: number, glow: string, selected: boolean)
 			choose("hotspot", n)
 		end,
 	}
-	if selected then
-		props.border, props.borderWidth = "on_surface", 2
-	end
+	-- Noctalia keeps a row's fill and border when a later render leaves them
+	-- out, so the unselected state sets them too (transparent)
+	props.border, props.borderWidth = if selected then "on_surface" else CLEAR, 2
 	return ui.row(props, { ui.label({ text = tostring(n), fontSize = 11, fontWeight = "bold", color = "#15151a" }) })
 end
 
@@ -305,9 +306,7 @@ local function sidebar(m, d)
 				choose("hotspot", h.n)
 			end
 		end }
-		if isSel then
-			props.fill = "surface"
-		end
+		props.fill = if isSel then "surface" else CLEAR -- set both ways, see pin()
 		table.insert(items, ui.row(props, { pin(h.n, d.glow, false), ui.column({ gap = 4, flexGrow = 1 }, body) }))
 	end
 	return card(items, { gap = 8 })
