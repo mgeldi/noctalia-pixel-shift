@@ -205,8 +205,9 @@ in a vertical bar it uses `height` instead.
 4. Separate content from background: pixels that moved are content; the background
    under them is interpolated from unmoved neighbours in the same row.
 5. Verification: all spacers at +8, capture, compare with the model prediction. If
-   the error exceeds a threshold, fall back to measuring each offset directly
-   (captures at every offset 0..W_max per slot, ~5 s; the lab warns first).
+   the error exceeds a threshold, the lab marks the results as approximate and asks
+   the user to check spacer placement. (Decision 2026-09-27: no per-offset
+   measurement fallback in v1.)
 6. Restore the active strategy.
 
 Triggers: first run, Rescan, and automatically when the spacer registry or a bar
@@ -279,7 +280,10 @@ and layout fingerprint.
 | `sample_minutes` | int | 10 | exposure sampling interval |
 | `step_minutes` | int | 4 | base time per 1 px step |
 | `max_shift` | int | 16 | upper bound for any slot range |
-| `allow_vertical` | bool | false | enables the vertical override file |
+
+Vertical permission is **not** a manifest setting: plugins cannot write their own
+settings, so the lab's `Allow vertical shift` toggle stores it in the plugin data
+dir (default off).
 
 ## 9. Architecture
 
@@ -316,7 +320,7 @@ Glue files hold everything that touches `noctalia`, `ui`, `barWidget`, `panel`,
 - Capture failure or timeout: retry on the next tick with backoff; lab shows the last
   good data.
 - No spacers: onboarding state.
-- Scan verification mismatch: per-offset measurement fallback.
+- Scan verification mismatch: results flagged approximate, placement hint.
 - Vertical override ineffective: warning, vertical disabled.
 - Corrupt data files: discard and rescan.
 - Plugin disable/uninstall (`onExit` reason `disable`/`uninstall`): remove the vertical
@@ -357,7 +361,15 @@ Glue files hold everything that touches `noctalia`, `ui`, `barWidget`, `panel`,
 - Optional follow-up: feature request in `noctalia-dev/noctalia` for a native bar
   pixel-shift, citing the lab's vertical numbers.
 
-## 14. Out of scope
+## 14. Known limitations (v1)
+
+- Only the first bar in `bar.order` is handled.
+- Content not moved by any spacer is treated as background, so the vertical
+  simulation only moves spacer-driven groups.
+- Exposure samples are skipped while the session is locked (logind `LockedHint`)
+  or when the capture does not match the scanned bar.
+
+## 15. Out of scope
 
 - Per-channel (colour-tinted) burn-in visualisation.
 - Shifting anything other than the bar (dock, desktop widgets).
