@@ -6,7 +6,7 @@ jobs:
   luau:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install luau 0.740
         run: |
           curl -sSL -o luau.zip https://github.com/luau-lang/luau/releases/download/0.740/luau-ubuntu.zip
