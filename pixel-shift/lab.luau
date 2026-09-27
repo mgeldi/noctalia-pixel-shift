@@ -22,6 +22,27 @@ local function send(cmd: string, arg)
 	noctalia.state.set("lab:cmd", { seq = `lab-{noctalia.nowMs()}-{seqN}`, cmd = cmd, arg = arg })
 end
 
+-- Selections show at once; the images follow when the engine has rendered
+-- them. A model rendered after the click replaces every pending choice.
+local pending, pendingAt = {}, 0
+
+local function current(m, field: string)
+	local v = pending[field]
+	if v ~= nil then
+		return v
+	end
+	return m.ui[field]
+end
+
+local function choose(field: string, value)
+	pending[field] = value
+	pendingAt = noctalia.nowMs()
+	send(field, value)
+	if model then
+		render()
+	end
+end
+
 local function round(x: number): number
 	return math.floor(x + 0.5)
 end
@@ -50,17 +71,19 @@ local function card(children, props)
 	return ui.column(props, children)
 end
 
-local function segmented(options, current, cmd: string)
+local function segmented(options, value, field: string)
 	local items = {}
 	for _, o in ipairs(options) do
-		local on = o.value == current
+		local on = o.value == value
 		table.insert(items, ui.button({
 			text = o.label,
 			controlSize = "sm",
 			variant = if on then "primary" else "ghost",
 			selected = on,
 			onClick = function()
-				send(cmd, o.value)
+				if not on then
+					choose(field, o.value)
+				end
 			end,
 		}))
 	end
@@ -76,7 +99,7 @@ local function pin(n: number, glow: string, selected: boolean)
 		align = "center",
 		justify = "center",
 		onClick = function()
-			send("hotspot", n)
+			choose("hotspot", n)
 		end,
 	}
 	if selected then
@@ -129,18 +152,18 @@ local function header(m)
 		for _, name in ipairs(m.outputs) do
 			table.insert(opts, { label = name, value = name })
 		end
-		table.insert(items, segmented(opts, m.ui.output, "output"))
+		table.insert(items, segmented(opts, current(m, "output"), "output"))
 	end
 	if d then
 		table.insert(items, segmented({
 			{ label = tr("lab.view.bar"), value = "bar" },
 			{ label = tr("lab.view.ghost"), value = "ghost" },
 			{ label = tr("lab.view.risk"), value = "risk" },
-		}, m.ui.view, "view"))
+		}, current(m, "view"), "view"))
 		table.insert(items, segmented({
 			{ label = tr("lab.mode.none"), value = "none" },
 			{ label = tr("lab.mode.strategy"), value = "strategy" },
-		}, m.ui.mode, "mode"))
+		}, current(m, "mode"), "mode"))
 		table.insert(items, ui.button({ glyph = "refresh", variant = "ghost", tooltip = tr("lab.rescan"), onClick = function()
 			send("rescan")
 		end }))
@@ -152,7 +175,7 @@ local function header(m)
 end
 
 -- overview -----------------------------------------------------------------------
-local function pinRow(pins, row: number, width: number, glow: string)
+local function pinRow(pins, row: number, width: number, glow: string, chosen: number)
 	local list = {}
 	for _, p in ipairs(pins) do
 		if p.row == row then
@@ -168,19 +191,33 @@ local function pinRow(pins, row: number, width: number, glow: string)
 		if left > cursor then
 			table.insert(children, ui.box({ width = left - cursor, height = 1, fill = "#00000000" }))
 		end
-		table.insert(children, pin(p.n, glow, p.selected))
+		table.insert(children, pin(p.n, glow, p.n == chosen))
 		cursor = left + 20
 	end
 	return ui.row({ height = 22, width = width, align = "center" }, children)
 end
 
-local function overview(d)
+-- Are the images behind the current selection still being rendered?
+local function updating(m, d): boolean
+	if next(pending) ~= nil then
+		return true
+	end
+	local st = d.state
+	return st ~= nil and (st.view ~= m.ui.view or st.mode ~= m.ui.mode or st.output ~= m.ui.output)
+end
+
+local function overview(m, d)
 	local o = d.overview
+	local chosen = current(m, "hotspot")
+	local title = { caption(tr("lab.overview")) }
+	if updating(m, d) then
+		table.insert(title, caption("· " .. tr("lab.updating")))
+	end
 	return ui.column({ gap = 4, align = "start" }, {
-		caption(tr("lab.overview")),
-		pinRow(o.pins, 1, o.w, d.glow),
+		ui.row({ gap = TIGHT, align = "center" }, title),
+		pinRow(o.pins, 1, o.w, d.glow, chosen),
 		ui.image({ path = o.left, width = o.w, height = o.h, fit = "stretch", radius = 6 }),
-		pinRow(o.pins, 2, o.w, d.glow),
+		pinRow(o.pins, 2, o.w, d.glow, chosen),
 		ui.image({ path = o.right, width = o.w, height = o.h, fit = "stretch", radius = 6 }),
 	})
 end
@@ -209,7 +246,7 @@ end
 
 -- sidebar: the result and its reasons in one surface -----------------------------
 local function sidebar(m, d)
-	local selected = m.ui.hotspot
+	local selected = current(m, "hotspot")
 	local items = {
 		caption(tr("lab.risk_title")),
 		ui.row({ gap = 10, align = "center" }, {
@@ -235,27 +272,38 @@ local function sidebar(m, d)
 		table.insert(items, note(noctalia.trp("lab.moves_nothing", #d.idle, { count = #d.idle }), 320, "error"))
 	end
 	table.insert(items, ui.separator({ spacing = 2 }))
+	table.insert(items, caption(tr("lab.hotspots_title")))
 	if #d.hotspots == 0 then
-		table.insert(items, note(tr("lab.no_hotspots"), 320))
+		table.insert(items, note(tr("lab.no_hotspots", { worst = round(d.worst or 0) }), 320))
 	end
 	for _, h in ipairs(d.hotspots) do
 		local isSel = h.n == selected
+		local head = {}
+		if h.thumb then
+			-- what the spot looks like on the bar, 22 px tall
+			local w = math.clamp(round(22 * h.thumb.w / math.max(h.thumb.h, 1)), 12, 96)
+			table.insert(head, ui.image({ path = h.thumb.path, width = w, height = 22, fit = "stretch", radius = 4 }))
+		end
+		table.insert(head, ui.label({
+			text = tr("hotspot.range", { side = tr("hotspot.side." .. h.side), x0 = h.x0, x1 = h.x1 }),
+			fontSize = 12.5,
+			fontWeight = if isSel then "semibold" else "normal",
+			color = "on_surface",
+		}))
 		local body = {
+			ui.row({ gap = 8, align = "center" }, head),
 			ui.row({ gap = 8, align = "center" }, {
-				ui.label({
-					text = tr("hotspot.range", { side = tr("hotspot.side." .. h.side), x0 = h.x0, x1 = h.x1 }),
-					fontSize = 12.5,
-					fontWeight = if isSel then "semibold" else "normal",
-					color = "on_surface",
-				}),
 				tag(tr("cause." .. h.cause), d.glow, h.cause == "outside" or h.cause == "dynamic"),
+				caption(tr("hotspot.level." .. (h.level or "low"), { peak = round(h.peak) })),
 			}),
 		}
 		if isSel then
 			table.insert(body, note(tr("hint." .. h.cause), 280))
 		end
 		local props = { gap = 9, paddingH = 8, paddingV = 6, radius = 10, align = "start", onClick = function()
-			send("hotspot", h.n)
+			if not isSel then
+				choose("hotspot", h.n)
+			end
 		end }
 		if isSel then
 			props.fill = "surface"
@@ -536,7 +584,7 @@ render = function()
 		end
 		local d = m.data
 		if d then
-			table.insert(children, overview(d))
+			table.insert(children, overview(m, d))
 			table.insert(children, ui.row({ gap = REGION, align = "start" }, {
 				inspector(d),
 				ui.column({ gap = 10, flexGrow = 1 }, { sidebar(m, d) }),
@@ -555,6 +603,9 @@ local isOpen = false
 
 noctalia.state.watch("lab:model", function(v)
 	model = v
+	if v and (v.stamp or 0) >= pendingAt then
+		pending = {} -- rendered after the last click: shows every choice
+	end
 	render()
 end)
 

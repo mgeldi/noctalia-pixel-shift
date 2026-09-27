@@ -25,6 +25,7 @@ local optimize = require("../pixel-shift/core/optimize")
 local labmodel = require("../pixel-shift/runtime/labmodel")
 
 local W, H, BAR = 400, 40, 32
+local SHARED = nil -- pipeline output reused by the cache test
 
 -- A dark bar with a left group (strokes + a wide pill) shifted by dx.
 local function capture(dx)
@@ -130,7 +131,48 @@ t.test("labmodel: pipeline from captures to lab data", function()
 	for _ in pairs(written) do
 		count += 1
 	end
-	t.eq(count, 5, "five current renders (older ones deleted)")
+	t.eq(count, 5 + #data.hotspots, "five current renders plus one thumbnail per hotspot")
+	t.eq(data.state.view, "ghost")
+	t.eq(data.state.mode, "strategy")
+	for _, h in ipairs(data.hotspots) do
+		t.ok(h.thumb ~= nil and h.level ~= nil, "each hotspot has a thumbnail and a level")
+	end
+	t.ok(type(data.worst) == "number", "worst remaining risk")
+	SHARED = { O = O, ctx = { primary = "#c1c5de", profile = "generic", preview = { ranges = pick.ranges, vertical = 0 },
+		active = { ranges = pick.ranges, vertical = 0 }, previewing = false, result = result, allowVertical = false,
+		lambdaT = 0.43, maxShift = 8, stepMinutes = 4, canRevert = false } }
+end)
+
+t.test("labmodel: switching back to a view reuses its images", function()
+	local S = SHARED
+	local writes, files = 0, {}
+	local ctx = table.clone(S.ctx)
+	ctx.writeImage = function(slot, bytes)
+		writes += 1
+		local p = `/fake2/{slot}-{writes}.bmp`
+		files[p] = true
+		return p
+	end
+	ctx.fileExists = function(p)
+		return files[p] == true
+	end
+	local O = S.O
+	O.renderCache = nil
+	labmodel.build(O, { view = "ghost", mode = "strategy", hotspot = 1 }, ctx)
+	local first = writes
+	t.ok(first > 0)
+	labmodel.build(O, { view = "ghost", mode = "strategy", hotspot = 1 }, ctx)
+	t.eq(writes, first, "same state: nothing rendered again")
+	labmodel.build(O, { view = "risk", mode = "strategy", hotspot = 1 }, ctx)
+	local afterRisk = writes
+	t.ok(afterRisk > first, "a new view renders its overview and inspector")
+	labmodel.build(O, { view = "ghost", mode = "strategy", hotspot = 1 }, ctx)
+	t.eq(writes, afterRisk, "back to ghost: cached files reused")
+	for p in pairs(files) do
+		files[p] = nil
+	end
+	labmodel.build(O, { view = "ghost", mode = "strategy", hotspot = 1 }, ctx)
+	t.ok(writes > afterRisk, "deleted files are written again")
 end)
 
 return {}

@@ -72,38 +72,129 @@ local function sortedSlots(layout)
 	return list
 end
 
+-- Everything expensive the lab shows is cached per output until its layers
+-- change: full-size views per strategy, hotspots, and the written images per
+-- state, so switching back and forth between views, modes and hotspots does
+-- not render again.
+M.CACHE_ITEMS = 32
+
+local function cacheOf(O)
+	local c = O.renderCache
+	if not c or c.layersId ~= O.layersId then
+		c = { layersId = O.layersId, items = {}, order = {} }
+		O.renderCache = c
+	end
+	return c
+end
+
+local function cached(O, key: string, fn)
+	local c = cacheOf(O)
+	local hit = c.items[key]
+	if hit ~= nil then
+		return hit
+	end
+	local v = fn()
+	c.items[key] = v
+	table.insert(c.order, key)
+	while #c.order > M.CACHE_ITEMS do
+		c.items[table.remove(c.order, 1)] = nil
+	end
+	return v
+end
+
+-- A cached set of written images, rendered again when a file is gone.
+local function files(O, ctx, key: string, fn)
+	local exists = ctx.fileExists or function(path: string)
+		return noctalia.fileExists(path)
+	end
+	local c = cacheOf(O)
+	local hit = c.items[key]
+	if hit then
+		for _, path in pairs(hit.paths) do
+			if not exists(path) then
+				hit = nil
+				break
+			end
+		end
+	end
+	if hit then
+		return hit
+	end
+	c.items[key] = nil
+	return cached(O, key, fn)
+end
+
+local function strategyKey(strategy): string
+	return `{util.stableEncode(strategy.ranges)}|{strategy.vertical or 0}`
+end
+
+local function views(O, ctx, evNone, evStrat)
+	local c = cached(O, "pct", function()
+		local y0, y1 = O.layout.scoreRows[1], O.layout.scoreRows[2]
+		return { eRef = image.percentile(evNone.E, 0.998, y0, y1), rTop = image.percentile(evNone.R, 0.999, y0, y1) }
+	end)
+	local ramp = color.glowRamp(ctx.primary)
+	local function view(name: string, ev, key: string)
+		if name == "bar" then
+			return if O.lastCapture
+				then O.lastCapture
+				else cached(O, "bar", function()
+					return render.fromLinear(O.base)
+				end)
+		end
+		return cached(O, `view|{name}|{key}|{ctx.primary}`, function()
+			if name == "risk" then
+				local lum = cached(O, "lum", function()
+					return image.luma(O.base)
+				end)
+				return render.riskView(lum, ev.R, c.rTop, color.riskRamp(ctx.primary))
+			end
+			return render.ghostView(ev.E, ev.R, c.eRef, c.rTop, ramp)
+		end)
+	end
+	return view, ramp
+end
+
+-- Renders every view and mode at the current hotspot ahead of time (the
+-- engine runs it in the background after the lab showed its first image), so
+-- switching between them only publishes cached paths.
+function M.prepare(O, ctx, ui)
+	for _, view in ipairs({ "ghost", "risk", "bar" }) do
+		for _, mode in ipairs({ "strategy", "none" }) do
+			M.build(O, { view = view, mode = mode, hotspot = ui and ui.hotspot or 1 }, ctx)
+		end
+	end
+end
+
 function M.build(O, ui, ctx)
-	local write = ctx.writeImage or store.writeImage
+	local writeImage = ctx.writeImage or store.writeImage
+	local prefix = (O.name or "output") .. "-"
+	local function write(slot: string, bytes: string)
+		return writeImage(prefix .. slot, bytes) -- slots per output: outputs never evict each other's files
+	end
 	local layout = O.layout
-	local y0, y1 = layout.scoreRows[1], layout.scoreRows[2]
 	local none = { ranges = {}, vertical = 0 }
 	local evNone = M.evaluate(O, none)
 	local evStrat = M.evaluate(O, ctx.preview)
-	local eRef = image.percentile(evNone.E, 0.998, y0, y1)
-	local rTop = image.percentile(evNone.R, 0.999, y0, y1)
-	local ramp = color.glowRamp(ctx.primary)
+	local sKey, nKey = strategyKey(ctx.preview), strategyKey(none)
+	local view, ramp = views(O, ctx, evNone, evStrat)
 	local glow = hex(ramp[205])
+	local shownKey = if ui.mode == "none" then nKey else sKey
+	local captureKey = if ui.view == "bar" then tostring(O.lastCapture) else ""
 
-	local function view(ev)
-		if ui.view == "risk" then
-			return render.riskView(image.luma(O.base), ev.R, rTop, color.riskRamp(ctx.primary))
-		elseif ui.view == "bar" then
-			return O.lastCapture or render.fromLinear(O.base)
-		end
-		return render.ghostView(ev.E, ev.R, eRef, rTop, ramp)
-	end
-	local fullNone, fullStrat = view(evNone), view(evStrat)
-	local shown = if ui.mode == "none" then fullNone else fullStrat
-
-	local spots = hotspots.find({
-		R = evStrat.R,
-		dw = O.layers.dw,
-		wWhite = wear.white(wear.profile(ctx.profile)),
-		variance = O.variance,
-		layout = layout,
-		rref = O.rref,
-		strategy = ctx.preview,
-	})
+	local found = cached(O, `spots|{sKey}|{ctx.profile}`, function()
+		local list, worst = hotspots.find({
+			R = evStrat.R,
+			dw = O.layers.dw,
+			wWhite = wear.white(wear.profile(ctx.profile)),
+			variance = O.variance,
+			layout = layout,
+			rref = O.rref,
+			strategy = ctx.preview,
+		})
+		return { list = list, worst = worst }
+	end)
+	local spots = found.list
 	local selected = math.clamp(ui.hotspot or 1, 1, math.max(#spots, 1))
 	local sel = spots[selected]
 
@@ -118,9 +209,41 @@ function M.build(O, ui, ctx)
 
 	-- overview halves with the inspected region framed
 	local half = layout.w // 2
-	local framed = render.zoom(shown, 0, shown.w, 0, shown.h, 1)
-	render.frame(framed, rx0, rx1, ramp[230])
-	local left, right = render.halves(framed, M.OVERVIEW_W)
+	local halves = cached(O, `halves|{ui.view}|{shownKey}|{captureKey}|{ctx.primary}`, function()
+		local left, right = render.halves(view(ui.view, if ui.mode == "none" then evNone else evStrat, shownKey), M.OVERVIEW_W)
+		return { left = left, right = right }
+	end)
+	local overview = files(O, ctx, `ov|{ui.view}|{shownKey}|{captureKey}|{ctx.primary}|{rx0}`, function()
+		local left, right = render.copy(halves.left), render.copy(halves.right)
+		render.frameHalves(left, right, rx0, rx1, layout.w, ramp[230])
+		return { h = left.h, paths = { left = write("overview-l", bmp.encode(left)), right = write("overview-r", bmp.encode(right)) } }
+	end)
+	local inspector = files(O, ctx, `in|{ui.view}|{sKey}|{captureKey}|{ctx.primary}|{rx0}`, function()
+		local fullNone, fullStrat = view(ui.view, evNone, nKey), view(ui.view, evStrat, sKey)
+		return {
+			paths = {
+				none = write("inspect-none", bmp.encode(render.zoom(fullNone, rx0, rx1, iy0, iy1, zoom))),
+				strategy = write("inspect-strategy", bmp.encode(render.zoom(fullStrat, rx0, rx1, iy0, iy1, zoom))),
+			},
+		}
+	end)
+	local legend = files(O, ctx, `legend|{ctx.primary}`, function()
+		return { paths = { legend = write("legend", bmp.encode(render.legend(ramp, 120, 8))) } }
+	end)
+	-- what each hotspot looks like on the bar itself
+	local thumbs = files(O, ctx, `thumbs|{sKey}|{ctx.profile}`, function()
+		local barView = view("bar")
+		local pad = math.ceil(12 * (layout.scale or 1))
+		local paths, sizes = {}, {}
+		for i, s in ipairs(spots) do
+			local x0, x1 = math.max(s.x0 - pad, 0), math.min(s.x1 + pad, layout.w)
+			local img = render.zoom(barView, x0, x1, layout.barRows[1], layout.barRows[2], 1)
+			paths[i] = write(`thumb-{i}`, bmp.encode(img))
+			sizes[i] = { w = img.w, h = img.h }
+		end
+		return { paths = paths, sizes = sizes }
+	end)
+
 	local scale = M.OVERVIEW_W / half
 	local pins = {}
 	for i, s in ipairs(spots) do
@@ -132,25 +255,27 @@ function M.build(O, ui, ctx)
 	local data = {
 		glow = glow,
 		info = O.info,
+		state = { view = ui.view, mode = ui.mode, hotspot = selected, output = O.name },
 		exposure = { n = if O.acc then O.acc.n else 0, hours = if O.acc and O.acc.n > 1 then (O.acc.last - O.acc.first) / 3600 else 0 },
 		score = { none = evNone.score, strategy = evStrat.score },
+		worst = found.worst,
 		approximate = O.approximate,
 		overview = {
-			left = write("overview-l", bmp.encode(left)),
-			right = write("overview-r", bmp.encode(right)),
+			left = overview.paths.left,
+			right = overview.paths.right,
 			w = M.OVERVIEW_W,
-			h = left.h,
+			h = overview.h,
 			pins = pins,
 		},
 		inspector = {
-			none = write("inspect-none", bmp.encode(render.zoom(fullNone, rx0, rx1, iy0, iy1, zoom))),
-			strategy = write("inspect-strategy", bmp.encode(render.zoom(fullStrat, rx0, rx1, iy0, iy1, zoom))),
+			none = inspector.paths.none,
+			strategy = inspector.paths.strategy,
 			w = (rx1 - rx0) * zoom,
 			h = (iy1 - iy0) * zoom,
 			zoom = zoom,
 			n = if sel then selected else nil,
 		},
-		legend = write("legend", bmp.encode(render.legend(ramp, 120, 8))),
+		legend = legend.paths.legend,
 		hotspots = {},
 		chips = {},
 		manual = {},
@@ -162,7 +287,8 @@ function M.build(O, ui, ctx)
 		canRevert = ctx.canRevert,
 	}
 	for i, s in ipairs(spots) do
-		data.hotspots[i] = { n = i, side = s.side, x0 = s.x0, x1 = s.x1, cause = s.cause, peak = s.peak }
+		data.hotspots[i] = { n = i, side = s.side, x0 = s.x0, x1 = s.x1, cause = s.cause, peak = s.peak, level = s.level,
+			thumb = if thumbs.paths[i] then { path = thumbs.paths[i], w = thumbs.sizes[i].w, h = thumbs.sizes[i].h } else nil }
 	end
 	for _, slot in ipairs(sortedSlots(layout)) do
 		local label = M.slotLabel(layout, slot)

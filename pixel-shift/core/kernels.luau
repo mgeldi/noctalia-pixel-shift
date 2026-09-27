@@ -361,6 +361,169 @@ do
 			o += 4
 		end
 	end
+
+	-- Lab images -----------------------------------------------------------
+	local ru8, wu8 = buffer.readu8, buffer.writeu8
+	local floor, clamp, min = math.floor, math.clamp, math.min
+
+	local function to8(v: number): number
+		v = floor(v + 0.5)
+		return if v < 0 then 0 elseif v > 255 then 255 else v
+	end
+
+	local function srgb(l: number): number
+		if l <= 0 then
+			return 0
+		elseif l >= 1 then
+			return 1
+		end
+		return if l <= 0.0031308 then 12.92 * l else 1.055 * l ^ (1 / 2.4) - 0.055
+	end
+
+	-- 24-bit BMP rows (bottom-up, BGR, each padded to rowSize) from RGB8
+	function K.bmpRows(src: buffer, w: number, h: number, dst: buffer, base: number, rowSize: number)
+		local n = w * 3
+		for y = 0, h - 1 do
+			if y % 16 == 0 then
+				budget.check()
+			end
+			local d = base + (h - 1 - y) * rowSize
+			buffer.copy(dst, d, src, y * n, n)
+			local o, last = d, d + n
+			while o + 12 <= last do
+				local r0, r1, r2, r3 = ru8(dst, o), ru8(dst, o + 3), ru8(dst, o + 6), ru8(dst, o + 9)
+				wu8(dst, o, ru8(dst, o + 2))
+				wu8(dst, o + 2, r0)
+				wu8(dst, o + 3, ru8(dst, o + 5))
+				wu8(dst, o + 5, r1)
+				wu8(dst, o + 6, ru8(dst, o + 8))
+				wu8(dst, o + 8, r2)
+				wu8(dst, o + 9, ru8(dst, o + 11))
+				wu8(dst, o + 11, r3)
+				o += 12
+			end
+			while o < last do
+				local r = ru8(dst, o)
+				wu8(dst, o, ru8(dst, o + 2))
+				wu8(dst, o + 2, r)
+				o += 3
+			end
+		end
+	end
+
+	-- cols RGB8 pixels from src at s, each repeated z times, written from d
+	function K.zoomRow(src: buffer, s: number, cols: number, z: number, dst: buffer, d: number)
+		for _ = 1, cols do
+			local r, g, b = ru8(src, s), ru8(src, s + 1), ru8(src, s + 2)
+			for _ = 1, z do
+				wu8(dst, d, r)
+				wu8(dst, d + 1, g)
+				wu8(dst, d + 2, b)
+				d += 3
+			end
+			s += 3
+		end
+	end
+
+	-- area-average downscale of RGB8 w x h to newW x newH
+	function K.scaleDown(src: buffer, w: number, h: number, newW: number, newH: number, dst: buffer)
+		local f = w / newW
+		for oy = 0, newH - 1 do
+			budget.check()
+			local sy0 = floor(oy * f)
+			local sy1 = math.max(sy0 + 1, min(floor((oy + 1) * f), h))
+			for ox = 0, newW - 1 do
+				local sx0 = floor(ox * f)
+				local sx1 = math.max(sx0 + 1, min(floor((ox + 1) * f), w))
+				local r, g, b = 0, 0, 0
+				for y = sy0, sy1 - 1 do
+					local s = (y * w + sx0) * 3
+					for _ = sx0, sx1 - 1 do
+						r += ru8(src, s)
+						g += ru8(src, s + 1)
+						b += ru8(src, s + 2)
+						s += 3
+					end
+				end
+				local n = (sy1 - sy0) * (sx1 - sx0)
+				local d = (oy * newW + ox) * 3
+				wu8(dst, d, to8(r / n))
+				wu8(dst, d + 1, to8(g / n))
+				wu8(dst, d + 2, to8(b / n))
+			end
+		end
+	end
+
+	-- f32: dst = what the bar leaves on a flat grey screen, from exposure E
+	function K.ghostGray(E: buffer, n: number, inv: number, dst: buffer)
+		for o = 0, (n - 1) * 4, 4 do
+			if o % 8192 == 0 then
+				budget.check()
+			end
+			local e = clamp(rf(E, o) * inv, 0, 1)
+			wf(dst, o, (0.60 - 0.40 * e ^ 0.8) * 0.72)
+		end
+	end
+
+	-- f32: dst = clamp(src * inv, 0, 1)
+	function K.clampScale(src: buffer, n: number, inv: number, dst: buffer)
+		for o = 0, (n - 1) * 4, 4 do
+			if o % 8192 == 0 then
+				budget.check()
+			end
+			wf(dst, o, clamp(rf(src, o) * inv, 0, 1))
+		end
+	end
+
+	-- RGB8: grey base (f32 0..1) under the glow ramp, by risk t plus bloom
+	function K.glowPixels(base: buffer, t: buffer, bloom: buffer, n: number, ramp, dst: buffer)
+		for i = 0, n - 1 do
+			if i % 2048 == 0 then
+				budget.check()
+			end
+			local o = i * 4
+			local tt = min(rf(t, o) + 0.35 * rf(bloom, o), 1)
+			local u = clamp((tt - 0.16) / (0.55 - 0.16), 0, 1)
+			local a = u * u * (3 - 2 * u)
+			local c = ramp[floor(tt * 255) + 1]
+			local g = rf(base, o) * 255
+			local d = i * 3
+			wu8(dst, d, to8(g * (1 - a) + c[1] * a))
+			wu8(dst, d + 1, to8(g * (1 - a) + c[2] * a))
+			wu8(dst, d + 2, to8(g * (1 - a) + c[3] * a))
+		end
+	end
+
+	-- RGB8: the bar dimmed to 20 % of its sRGB luma under the risk ramp
+	function K.riskPixels(lum: buffer, R: buffer, n: number, inv: number, ramp, dst: buffer)
+		for i = 0, n - 1 do
+			if i % 2048 == 0 then
+				budget.check()
+			end
+			local o = i * 4
+			local tr = clamp(rf(R, o) * inv, 0, 1) ^ 0.7
+			local a = clamp(1.4 * tr, 0, 1)
+			local g = srgb(rf(lum, o)) * 0.2 * 255
+			local c = ramp[floor(tr * 255) + 1]
+			local d = i * 3
+			wu8(dst, d, to8(g * (1 - a) + c[1] * a))
+			wu8(dst, d + 1, to8(g * (1 - a) + c[2] * a))
+			wu8(dst, d + 2, to8(g * (1 - a) + c[3] * a))
+		end
+	end
+
+	-- RGB8 from linear f32 channel planes
+	function K.fromLinear3(r: buffer, g: buffer, b: buffer, n: number, dst: buffer)
+		for i = 0, n - 1 do
+			if i % 2048 == 0 then
+				budget.check()
+			end
+			local o, d = i * 4, i * 3
+			wu8(dst, d, to8(srgb(rf(r, o)) * 255))
+			wu8(dst, d + 1, to8(srgb(rf(g, o)) * 255))
+			wu8(dst, d + 2, to8(srgb(rf(b, o)) * 255))
+		end
+	end
 end
 -- END KERNELS
 

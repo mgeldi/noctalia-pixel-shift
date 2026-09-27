@@ -60,7 +60,9 @@
       "center": "Make {widget} the first or last item of the bar's center section.",
       "end": "Make {widget} the last item of the bar's end section, or it cannot move anything."
     },
-    "no_hotspots": "Nothing risky left. Nice bar.",
+    "no_hotspots": "No hotspots left. The strongest remaining spot reaches {worst} % of a white line that never moves.",
+    "hotspots_title": "Hotspots · where a ghost would still show, strongest first",
+    "updating": "updating…",
     "strategy": "Strategy",
     "auto": "Auto",
     "manual": "Manual",
@@ -113,7 +115,12 @@
       "center": "Center group",
       "right": "Right group"
     },
-    "range": "{side} · {x0}–{x1} px"
+    "range": "{side} · {x0}–{x1} px",
+    "level": {
+      "high": "high · {peak} %",
+      "medium": "medium · {peak} %",
+      "low": "low · {peak} %"
+    }
   },
   "cause": {
     "outside": "outside the bar",

@@ -8,6 +8,8 @@ local budget = require("./core/budget.luau")
 local image = require("./core/image.luau")
 local wear = require("./core/wear.luau")
 local risk = require("./core/risk.luau")
+local render = require("./core/render.luau")
+local bmp = require("./core/bmp.luau")
 local layoutMod = require("./core/layout.luau")
 local scanstore = require("./core/scanstore.luau")
 local exposure = require("./core/exposure.luau")
@@ -371,10 +373,175 @@ do
 			o += 4
 		end
 	end
+
+	-- Lab images -----------------------------------------------------------
+	local ru8, wu8 = buffer.readu8, buffer.writeu8
+	local floor, clamp, min = math.floor, math.clamp, math.min
+
+	local function to8(v: number): number
+		v = floor(v + 0.5)
+		return if v < 0 then 0 elseif v > 255 then 255 else v
+	end
+
+	local function srgb(l: number): number
+		if l <= 0 then
+			return 0
+		elseif l >= 1 then
+			return 1
+		end
+		return if l <= 0.0031308 then 12.92 * l else 1.055 * l ^ (1 / 2.4) - 0.055
+	end
+
+	-- 24-bit BMP rows (bottom-up, BGR, each padded to rowSize) from RGB8
+	function K.bmpRows(src: buffer, w: number, h: number, dst: buffer, base: number, rowSize: number)
+		local n = w * 3
+		for y = 0, h - 1 do
+			if y % 16 == 0 then
+				budget.check()
+			end
+			local d = base + (h - 1 - y) * rowSize
+			buffer.copy(dst, d, src, y * n, n)
+			local o, last = d, d + n
+			while o + 12 <= last do
+				local r0, r1, r2, r3 = ru8(dst, o), ru8(dst, o + 3), ru8(dst, o + 6), ru8(dst, o + 9)
+				wu8(dst, o, ru8(dst, o + 2))
+				wu8(dst, o + 2, r0)
+				wu8(dst, o + 3, ru8(dst, o + 5))
+				wu8(dst, o + 5, r1)
+				wu8(dst, o + 6, ru8(dst, o + 8))
+				wu8(dst, o + 8, r2)
+				wu8(dst, o + 9, ru8(dst, o + 11))
+				wu8(dst, o + 11, r3)
+				o += 12
+			end
+			while o < last do
+				local r = ru8(dst, o)
+				wu8(dst, o, ru8(dst, o + 2))
+				wu8(dst, o + 2, r)
+				o += 3
+			end
+		end
+	end
+
+	-- cols RGB8 pixels from src at s, each repeated z times, written from d
+	function K.zoomRow(src: buffer, s: number, cols: number, z: number, dst: buffer, d: number)
+		for _ = 1, cols do
+			local r, g, b = ru8(src, s), ru8(src, s + 1), ru8(src, s + 2)
+			for _ = 1, z do
+				wu8(dst, d, r)
+				wu8(dst, d + 1, g)
+				wu8(dst, d + 2, b)
+				d += 3
+			end
+			s += 3
+		end
+	end
+
+	-- area-average downscale of RGB8 w x h to newW x newH
+	function K.scaleDown(src: buffer, w: number, h: number, newW: number, newH: number, dst: buffer)
+		local f = w / newW
+		for oy = 0, newH - 1 do
+			budget.check()
+			local sy0 = floor(oy * f)
+			local sy1 = math.max(sy0 + 1, min(floor((oy + 1) * f), h))
+			for ox = 0, newW - 1 do
+				local sx0 = floor(ox * f)
+				local sx1 = math.max(sx0 + 1, min(floor((ox + 1) * f), w))
+				local r, g, b = 0, 0, 0
+				for y = sy0, sy1 - 1 do
+					local s = (y * w + sx0) * 3
+					for _ = sx0, sx1 - 1 do
+						r += ru8(src, s)
+						g += ru8(src, s + 1)
+						b += ru8(src, s + 2)
+						s += 3
+					end
+				end
+				local n = (sy1 - sy0) * (sx1 - sx0)
+				local d = (oy * newW + ox) * 3
+				wu8(dst, d, to8(r / n))
+				wu8(dst, d + 1, to8(g / n))
+				wu8(dst, d + 2, to8(b / n))
+			end
+		end
+	end
+
+	-- f32: dst = what the bar leaves on a flat grey screen, from exposure E
+	function K.ghostGray(E: buffer, n: number, inv: number, dst: buffer)
+		for o = 0, (n - 1) * 4, 4 do
+			if o % 8192 == 0 then
+				budget.check()
+			end
+			local e = clamp(rf(E, o) * inv, 0, 1)
+			wf(dst, o, (0.60 - 0.40 * e ^ 0.8) * 0.72)
+		end
+	end
+
+	-- f32: dst = clamp(src * inv, 0, 1)
+	function K.clampScale(src: buffer, n: number, inv: number, dst: buffer)
+		for o = 0, (n - 1) * 4, 4 do
+			if o % 8192 == 0 then
+				budget.check()
+			end
+			wf(dst, o, clamp(rf(src, o) * inv, 0, 1))
+		end
+	end
+
+	-- RGB8: grey base (f32 0..1) under the glow ramp, by risk t plus bloom
+	function K.glowPixels(base: buffer, t: buffer, bloom: buffer, n: number, ramp, dst: buffer)
+		for i = 0, n - 1 do
+			if i % 2048 == 0 then
+				budget.check()
+			end
+			local o = i * 4
+			local tt = min(rf(t, o) + 0.35 * rf(bloom, o), 1)
+			local u = clamp((tt - 0.16) / (0.55 - 0.16), 0, 1)
+			local a = u * u * (3 - 2 * u)
+			local c = ramp[floor(tt * 255) + 1]
+			local g = rf(base, o) * 255
+			local d = i * 3
+			wu8(dst, d, to8(g * (1 - a) + c[1] * a))
+			wu8(dst, d + 1, to8(g * (1 - a) + c[2] * a))
+			wu8(dst, d + 2, to8(g * (1 - a) + c[3] * a))
+		end
+	end
+
+	-- RGB8: the bar dimmed to 20 % of its sRGB luma under the risk ramp
+	function K.riskPixels(lum: buffer, R: buffer, n: number, inv: number, ramp, dst: buffer)
+		for i = 0, n - 1 do
+			if i % 2048 == 0 then
+				budget.check()
+			end
+			local o = i * 4
+			local tr = clamp(rf(R, o) * inv, 0, 1) ^ 0.7
+			local a = clamp(1.4 * tr, 0, 1)
+			local g = srgb(rf(lum, o)) * 0.2 * 255
+			local c = ramp[floor(tr * 255) + 1]
+			local d = i * 3
+			wu8(dst, d, to8(g * (1 - a) + c[1] * a))
+			wu8(dst, d + 1, to8(g * (1 - a) + c[2] * a))
+			wu8(dst, d + 2, to8(g * (1 - a) + c[3] * a))
+		end
+	end
+
+	-- RGB8 from linear f32 channel planes
+	function K.fromLinear3(r: buffer, g: buffer, b: buffer, n: number, dst: buffer)
+		for i = 0, n - 1 do
+			if i % 2048 == 0 then
+				budget.check()
+			end
+			local o, d = i * 4, i * 3
+			wu8(dst, d, to8(srgb(rf(r, o)) * 255))
+			wu8(dst, d + 1, to8(srgb(rf(g, o)) * 255))
+			wu8(dst, d + 2, to8(srgb(rf(b, o)) * 255))
+		end
+	end
 end
 -- END KERNELS
 image.install(K)
 risk.install(K)
+render.install(K)
+bmp.install(K)
 
 local PROBE = 8 -- logical px each spacer is widened by while measuring
 local SETTLE_MS = 150 -- wait after the spacers acknowledged before capturing
@@ -395,6 +562,9 @@ if saved.auto == nil then
 end
 saved.allowVertical = saved.allowVertical == true
 saved.paused = saved.paused == true
+if type(saved.themeHex) ~= "string" then
+	saved.themeHex = nil
+end
 
 local spacers = {} -- id -> {output, vertical, t}
 local outputs = {} -- name -> O
@@ -406,7 +576,7 @@ local status = { kind = "idle" }
 local labOpen, labDirty = false, true
 local dataDirty = true -- lab images/data need rebuilding (not just the status line)
 local lastData = nil
-local themeHex = nil
+local themeHex = saved.themeHex -- the theme's primary colour, remembered across restarts
 local optimizer = nil -- {name, opt, started, allowVertical}
 local spacerChangedAt = os.time()
 local fingerprintDue = true
@@ -414,6 +584,7 @@ local lastFingerprint, lastSlow, lastVertical, lastDrift = 0, 0, -1, 0
 local verticalCheck = nil -- {at, v, retried}: confirm that an applied override took effect
 local errors = {}
 local lastCmd = nil
+local timing, lastCmdAt = false, 0 -- IPC "timing on": log how long the lab takes to answer
 
 -- Heavy core loops call budget.check(); inside a task or the optimiser this
 -- yields once the slice is used up, so no callback comes near the host's
@@ -799,6 +970,10 @@ local function locked(): boolean
 	return res ~= nil and res.exitCode == 0 and string.find(res.stdout, "yes", 1, true) ~= nil
 end
 
+local function lumaFromCapture(img)
+	return image.luma(wear.linearFromRgb8(img))
+end
+
 local function scanTask(name: string)
 	tasks.spawn("scan:" .. name, function()
 		local O = outputs[name]
@@ -816,12 +991,60 @@ local function scanTask(name: string)
 			noctalia.log(`pixel-shift: session locked, measuring {name} later`)
 			return
 		end
+		if O.coveredL then
+			-- The last attempt did not see the bar. Look before measuring, so a
+			-- fullscreen window does not make the bars twitch and blink: still the
+			-- same picture, or a moving one (a video; a bar is mostly still), means
+			-- still covered. The measured bar itself, or a new still picture (a new
+			-- look), gets measured.
+			local geom0 = util.captureGeometry(out, barInfo())
+			local function look()
+				local img = capture.grab(geom0.geometry, geom0.transpose)
+				if img and img.w == O.coveredL.w and img.h == O.coveredL.h then
+					return lumaFromCapture(img)
+				end
+				return nil
+			end
+			local a = look()
+			if a then
+				local rows = O.layout or { barRows = { 0, a.h } }
+				local covered = false
+				if not (O.baseL and exposure.matchesBaseline(a, O.baseL, rows)) then
+					covered = exposure.matchesBaseline(a, O.coveredL, rows)
+					if not covered then
+						tasks.sleep(400)
+						local b = look()
+						covered = b ~= nil and not exposure.matchesBaseline(b, a, rows)
+					end
+				end
+				if covered then
+					O.failures += 1
+					O.retryAt = os.time() + decide.backoff(O.failures)
+					noctalia.log(`pixel-shift: {name} is still covered, measuring later`)
+					return
+				end
+			end
+		end
 		setStatus({ kind = "scanning", output = name })
 		noctalia.log("pixel-shift: measuring " .. name)
 		-- measure the bar at its own size: without the vertical override, after
 		-- Noctalia reloaded (the vertical player holds while a scan runs)
+		local reloaded = vertical.active()
+		local clearedAt = noctalia.nowMs()
 		vertical.clear()
 		tasks.waitFor(vertical.settled, vertical.SETTLE_MS + 1000)
+		if reloaded then
+			-- the reload recreated the spacers: wait until each one is back
+			tasks.waitFor(function()
+				for _, id in ipairs(ids) do
+					local sp = spacers[id]
+					if not sp or (sp.ms or 0) < clearedAt then
+						return false
+					end
+				end
+				return true
+			end, 4000)
+		end
 		local bar = barInfo()
 		if not bar.enabled then
 			O.needsScan = false
@@ -841,25 +1064,53 @@ local function scanTask(name: string)
 				return acked(ids)
 			end, 2000)
 			if not drawn then
-				return nil, "the spacers did not respond"
+				local missing = {}
+				for _, id in ipairs(ids) do
+					local a = noctalia.state.get("ack:" .. id)
+					if type(a) ~= "number" or a < seq then
+						table.insert(missing, id)
+					end
+				end
+				return nil, "no answer from spacer " .. table.concat(missing, ", ")
 			end
 			tasks.sleep(SETTLE_MS)
 			return capture.grab(geom.geometry, geom.transpose)
 		end
 
+		local function lumaOf(img)
+			return image.luma(wear.linearFromRgb8(img))
+		end
 		local baseA, err = shot(zero)
 		if not baseA then
 			return fail(name, err)
 		end
-		local probes = {}
-		for _, id in ipairs(ids) do
+		local lin = wear.linearFromRgb8(baseA)
+		local baseL = image.luma(lin)
+		-- each probe with a base captured just before it: widgets that change
+		-- width (a CPU percentage) shift everything after them in between
+		local pairsL = {}
+		local function takePair(id, preL)
+			if not preL then
+				local pre, perr = shot(zero)
+				if not pre then
+					return nil, perr
+				end
+				preL = lumaOf(pre)
+			end
 			local m = table.clone(zero)
 			m[id] = PROBE
-			local img, perr = shot(m)
-			if not img then
+			local probe, perr = shot(m)
+			if not probe then
+				return nil, perr
+			end
+			pairsL[id] = { base = preL, probe = lumaOf(probe) }
+			return true
+		end
+		for i, id in ipairs(ids) do
+			local ok, perr = takePair(id, if i == 1 then baseL else nil)
+			if not ok then
 				return fail(name, perr)
 			end
-			probes[id] = img
 		end
 		local all = {}
 		for _, id in ipairs(ids) do
@@ -873,47 +1124,58 @@ local function scanTask(name: string)
 		if not baseB then
 			return fail(name, berr)
 		end
-		forced = nil
-		publishWidths(true)
 
 		-- noctalia.outputs() reports the integer buffer scale (2 for 1.5), so the
 		-- physical scale comes from the capture itself.
 		local scale = baseA.w / (if geom.transpose then out.height else out.width)
 		local barPx = math.floor(bar.thickness * scale + 0.5)
 		local barRows, scoreRows = util.rowLayout(geom.flipped, baseA.h, barPx)
-		local lin = wear.linearFromRgb8(baseA)
-		local baseL = image.luma(lin)
-		local probeL = {}
-		for id, img in pairs(probes) do
-			probeL[id] = image.luma(wear.linearFromRgb8(img))
+		local baseBL = lumaOf(baseB)
+		local allL = lumaOf(allImg)
+		local l, diff, odd
+		for attempt = 1, 3 do
+			l, diff, odd = layoutMod.build({
+				base = baseL,
+				baseB = baseBL,
+				all = allL,
+				pairs = pairsL,
+				probePx = PROBE,
+				scale = scale,
+				barRows = barRows,
+				scoreRows = scoreRows,
+				vDir = geom.vDir,
+			})
+			if #odd == 0 or attempt == 3 then
+				break
+			end
+			noctalia.log(`pixel-shift: {table.concat(odd, ", ")} on {name} moved inconsistently (a widget changed width while measuring?), measuring again`)
+			for _, id in ipairs(odd) do
+				local ok, perr = takePair(id, nil)
+				if not ok then
+					return fail(name, perr)
+				end
+			end
 		end
-		local l, diff = layoutMod.build({
-			base = baseL,
-			baseB = image.luma(wear.linearFromRgb8(baseB)),
-			probes = probeL,
-			probePx = PROBE,
-			scale = scale,
-			barRows = barRows,
-			scoreRows = scoreRows,
-			vDir = geom.vDir,
-		})
+		forced = nil
+		publishWidths(true)
 		local bg = layoutMod.background(lin, l, diff)
-		local verr = layoutMod.verify(l, baseL, image.luma(bg), image.luma(wear.linearFromRgb8(allImg)))
+		local verr = layoutMod.verify(l, baseL, image.luma(bg), allL)
 
 		-- nothing moved: a lock screen or fullscreen app covers the bar, or the
 		-- spacers sit where they cannot move anything
-		local outcome = decide.scanOutcome(l, decide.anyMoving(O.layout), O.failures + 1)
+		local outcome = decide.scanOutcome(l, decide.anyMoving(O.layout), O.failures + 1, verr)
+		O.coveredL = if decide.isBar(l, verr) then nil else baseL
 		if not outcome.accept then
 			O.failures += 1
 			O.retryAt = os.time() + outcome.retryIn
-			noctalia.log(`pixel-shift: nothing moved while measuring {name} (bar covered?); keeping the previous measurement, next try in {outcome.retryIn} s`)
+			noctalia.log(`pixel-shift: the measurement of {name} did not see the bar (covered?); keeping the previous one, next try in {outcome.retryIn} s`)
 			setStatus({ kind = "idle" })
 			return
 		end
 		l.format = decide.LAYOUT_FORMAT
 		O.layout, O.base, O.bg, O.baseL = l, lin, bg, baseL
 		O.scanLayers = {}
-		O.approximate = verr > layoutMod.VERIFY_LIMIT
+		O.approximate = verr > layoutMod.VERIFY_LIMIT or #odd > 0
 		O.lastCapture = baseA
 		O.info = { width = out.width, thickness = bar.thickness, scale = scale, bright = exposure.brightFraction(baseA) }
 		local fp = fingerprintFor(name, bar, out)
@@ -1146,7 +1408,61 @@ local function barAdvice()
 	return barAdviceCache
 end
 
+local function labCtx(O)
+	local meta = saved.outputs[O.name] or {}
+	local active = activeStrategy(O.name)
+	return {
+		primary = themeHex,
+		profile = profileName(),
+		preview = O.preview or active,
+		active = active,
+		previewing = O.preview ~= nil,
+		result = O.result,
+		allowVertical = allowVerticalNow(),
+		lambdaT = saved.lambdaT,
+		maxShift = setting("max_shift", 16),
+		stepMinutes = setting("step_minutes", 4),
+		canRevert = meta.history ~= nil and #meta.history > 0,
+	}
+end
+
+-- After the lab showed an image, render the other views and modes of the
+-- same strategy in the background, then those of the other outputs; later
+-- clicks only crop and encode. A newer request replaces a queued one.
+local warmedFor, warmQueue = nil, nil
+local function warmLab(O, ctx)
+	local key = `{O.name}|{O.layersId}|{util.stableEncode(ctx.preview.ranges)}|{ctx.preview.vertical or 0}|{ctx.primary}`
+	if key == warmedFor then
+		return
+	end
+	warmQueue = { O = O, ctx = ctx, key = key }
+	if tasks.running("lab-warm") then
+		return
+	end
+	tasks.spawn("lab-warm", function()
+		local function prepare(target, targetCtx, targetUi)
+			local ok, err = pcall(labmodel.prepare, target, targetCtx, targetUi)
+			if not ok then
+				noctalia.log("pixel-shift: lab prepare failed: " .. tostring(err))
+			end
+		end
+		local shown = nil
+		while warmQueue do
+			local job = warmQueue
+			warmQueue = nil
+			warmedFor, shown = job.key, job.O
+			prepare(job.O, job.ctx, table.clone(ui))
+		end
+		for _, other in pairs(outputs) do
+			if other ~= shown and other.layout and other.layers and labOpen then
+				prepare(other, labCtx(other), { hotspot = 1 })
+			end
+		end
+	end)
+end
+
 local function renderLab()
+	local t0 = noctalia.nowMs()
 	local names = {}
 	for name in pairs(outputs) do
 		table.insert(names, name)
@@ -1181,33 +1497,28 @@ local function renderLab()
 		placement = advice.placement,
 	}
 	local O = ui.output and outputs[ui.output]
-	if not dataDirty and lastData then
+	-- a command that arrives while this render runs marks the data dirty
+	-- again, so the next render picks it up
+	local rebuild = dataDirty or lastData == nil
+	dataDirty = false
+	if not rebuild then
 		model.data = lastData
 	elseif O and O.layout and O.layers then
-		local meta = saved.outputs[ui.output] or {}
-		local active = activeStrategy(ui.output)
-		local ok, data = pcall(labmodel.build, O, ui, {
-			primary = themeHex,
-			profile = profileName(),
-			preview = O.preview or active,
-			active = active,
-			previewing = O.preview ~= nil,
-			result = O.result,
-			allowVertical = allowVerticalNow(),
-			lambdaT = saved.lambdaT,
-			maxShift = setting("max_shift", 16),
-			stepMinutes = setting("step_minutes", 4),
-			canRevert = meta.history ~= nil and #meta.history > 0,
-		})
+		local ctx = labCtx(O)
+		local ok, data = pcall(labmodel.build, O, table.clone(ui), ctx)
 		if ok then
 			model.data = data
 			lastData = data
-			dataDirty = false
+			warmLab(O, ctx)
 		else
 			noctalia.log("pixel-shift: lab render failed: " .. tostring(data))
 		end
 	end
 	noctalia.state.set("lab:model", model)
+	if timing then
+		local now = noctalia.nowMs()
+		noctalia.log(`pixel-shift timing: lab {if rebuild then "render" else "update"} {now - t0} ms, {now - lastCmdAt} ms after the last command`)
+	end
 end
 
 local function setAllowVertical(on: boolean)
@@ -1237,6 +1548,7 @@ local function setPaused(p: boolean)
 end
 
 local function handle(cmd: string, arg)
+	lastCmdAt = noctalia.nowMs()
 	if cmd ~= "output" then
 		ui.output = decide.pickOutput(ui.output, outputs) -- scripts may act before the lab opened
 	end
@@ -1312,6 +1624,8 @@ local function handle(cmd: string, arg)
 				local hex = theme.resolve(ui.output)
 				if hex ~= themeHex then
 					themeHex = hex
+					saved.themeHex = hex
+					persist()
 					dataDirty = true
 				end
 				labDirty = true
@@ -1331,7 +1645,7 @@ noctalia.state.watch("spacer:hello", function(v)
 		return
 	end
 	local prev = spacers[v.id]
-	spacers[v.id] = { output = v.output or "", vertical = v.vertical == true, t = os.time() }
+	spacers[v.id] = { output = v.output or "", vertical = v.vertical == true, t = os.time(), ms = noctalia.nowMs() }
 	if not prev or prev.output ~= spacers[v.id].output then
 		spacerChangedAt, fingerprintDue = os.time(), true
 		publishKnown()
@@ -1353,6 +1667,7 @@ noctalia.state.watch("lab:cmd", function(c)
 	end
 	lastCmd = c.seq
 	handle(c.cmd, c.arg)
+	noctalia.setUpdateInterval(16) -- answer the click on the next frame, not the next second
 end)
 
 function onIpc(event, payload)
@@ -1377,6 +1692,7 @@ function onIpc(event, payload)
 		handle(event, payload)
 	elseif event == "view" or event == "mode" or event == "output" or event == "hotspot" then
 		handle(event, payload) -- drive the lab from scripts
+		noctalia.setUpdateInterval(16)
 	elseif event == "lambda" then
 		handle("lambda", tonumber(payload)) -- protection level 0 (calm) .. 1 (max); "apply" makes it active
 	elseif event == "apply" or event == "revert" then
@@ -1391,6 +1707,8 @@ function onIpc(event, payload)
 		end
 	elseif event == "lab" then
 		noctalia.togglePanel("mgeldi/pixel-shift:lab")
+	elseif event == "timing" then
+		timing = payload ~= "off"
 	end
 end
 
@@ -1477,11 +1795,13 @@ function update()
 		end
 		playVertical(now)
 	end
-	if labOpen and labDirty and not tasks.active() then
+	-- the lab render does not wait for other tasks: the newest task runs
+	-- first in each slice, so a click is answered before a sample finishes
+	if labOpen and labDirty and not tasks.running("lab") then
 		labDirty = false
 		tasks.spawn("lab", renderLab)
 	end
-	noctalia.setUpdateInterval(if optimizer or tasks.active() then 33 else 1000)
+	noctalia.setUpdateInterval(if tasks.running("lab") then 16 elseif optimizer or tasks.active() then 33 else 1000)
 end
 
 -- start ---------------------------------------------------------------------------

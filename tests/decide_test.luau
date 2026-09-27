@@ -146,4 +146,14 @@ t.test("decide: misplaced spacers are named with the section they belong to", fu
 	t.eq(mid[1].want, "center")
 end)
 
+t.test("decide: a measurement the all-spacers capture contradicts is not the bar", function()
+	-- a video under a fullscreen window can line up with a spacer shift by chance;
+	-- the prediction then misses the capture with every spacer widened by far
+	local o = decide.scanOutcome(MOVING, true, 1, 15632)
+	t.eq(o.accept, false, "keeps the previous measurement")
+	t.eq(o.retryIn, 60)
+	t.eq(decide.scanOutcome(MOVING, true, 1, 0.3).accept, true)
+	t.eq(decide.scanOutcome(MOVING, false, 1, 20).optimize, false, "a first one is kept but not optimized")
+end)
+
 return {}
