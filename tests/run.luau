@@ -3,6 +3,7 @@ local t = require("./testlib")
 local filter = ...
 
 local modules = {
+	"./simulate_test",
 	"./scanstore_test",
 	"./layout_test",
 	"./util_test",
