@@ -1,0 +1,46 @@
+--!nonstrict
+local t = require("./testlib")
+local image = require("../pixel-shift/core/image")
+local ppm = require("../pixel-shift/core/ppm")
+local color = require("../pixel-shift/core/color")
+local render = require("../pixel-shift/core/render")
+
+t.test("render: ghost grey range", function()
+	local E = image.new(2, 1)
+	image.set(E, 1, 0, 5)
+	local g = render.ghostGray(E, 5)
+	t.near(image.get(g, 0, 0), 0.6 * 0.72, 1e-6)
+	t.near(image.get(g, 1, 0), 0.2 * 0.72, 1e-6)
+end)
+
+t.test("render: glow is the base where risk is zero and the ramp top at the peak", function()
+	local base, R = image.new(9, 9), image.new(9, 9)
+	for y = 0, 8 do for x = 0, 8 do image.set(base, x, y, 0.5); image.set(R, x, y, 0) end end
+	for y = 2, 6 do for x = 2, 6 do image.set(R, x, y, 2) end end
+	local ramp = color.glowRamp("#c1c5de")
+	local out = render.glow(base, R, 1, ramp)
+	local r0 = ppm.get(out, 0, 0)
+	t.eq(r0, 128)
+	local r, g, b = ppm.get(out, 4, 4)
+	t.eq(r, ramp[256][1]); t.eq(g, ramp[256][2]); t.eq(b, ramp[256][3])
+end)
+
+t.test("render: scaleDown, halves, zoom, frame, legend", function()
+	local img = ppm.new(4, 2)
+	ppm.set(img, 0, 0, 100, 0, 0); ppm.set(img, 1, 0, 200, 0, 0)
+	local s = render.scaleDown(img, 2)
+	t.eq(s.w, 2); t.eq(s.h, 1)
+	t.eq((ppm.get(s, 0, 0)), 75)
+	local left, right = render.halves(img, 2)
+	t.eq(left.w, 2); t.eq(right.w, 2)
+	local z = render.zoom(img, 0, 2, 0, 1, 3)
+	t.eq(z.w, 6); t.eq(z.h, 3)
+	t.eq((ppm.get(z, 4, 2)), 200)
+	local f = ppm.new(6, 4)
+	render.frame(f, 1, 4, { 9, 8, 7 })
+	t.eq((ppm.get(f, 1, 0)), 9); t.eq((ppm.get(f, 2, 1)), 0); t.eq((ppm.get(f, 3, 3)), 9)
+	local lg = render.legend(color.glowRamp("#c1c5de"), 64, 4)
+	t.eq(lg.w, 64); t.eq(lg.h, 4)
+end)
+
+return {}

@@ -3,6 +3,7 @@ local t = require("./testlib")
 local filter = ...
 
 local modules = {
+	"./render_test",
 	"./hotspots_test",
 	"./exposure_test",
 	"./schedule_test",
