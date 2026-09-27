@@ -1,6 +1,6 @@
 id = "mgeldi/pixel-shift"
 name = "Pixel Shift"
-version = "0.1.0"
+version = "1.0.0"
 plugin_api = 30
 author = "mgeldi"
 license = "MIT"

@@ -38,7 +38,10 @@
     },
     "exposure": {
       "none": "Exposure: 1 snapshot",
-      "some": "Exposure: {count} samples · {hours} h"
+      "some": {
+        "one": "Exposure: {count} sample · {hours} h",
+        "other": "Exposure: {count} samples · {hours} h"
+      }
     },
     "overview": "Whole bar · left half / right half",
     "inspect_center": "Bar centre",

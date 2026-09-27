@@ -120,7 +120,7 @@ local function header(m)
 	if d then
 		local e = d.exposure
 		table.insert(items, chip(if e.n > 0
-			then tr("lab.exposure.some", { count = e.n, hours = string.format("%.1f", e.hours) })
+			then noctalia.trp("lab.exposure.some", e.n, { count = e.n, hours = string.format("%.1f", e.hours) })
 			else tr("lab.exposure.none")))
 	end
 	table.insert(items, ui.spacer({ flexGrow = 1 }))
