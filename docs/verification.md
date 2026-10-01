@@ -63,13 +63,14 @@ Measured with the `timing on` IPC event while driving the lab over IPC.
   - `rescan` on DP-3 was postponed ("measuring DP-3 later, a fullscreen window
     is open") and retried once a minute without logging again;
   - horizontal widths kept changing on both outputs;
-  - no bar was recreated while the window stayed fullscreen.
+  - no bar was recreated while the window stayed fullscreen;
+  - when the window left fullscreen, the postponed DP-3 measurement ran
+    (19:27:36, verify error 0.03) and the vertical override went back on
+    (19:28:08), with one bar recreation and nothing fullscreen.
 - Unit tests: 141 passed, kernels in sync; `noctalia plugins lint`: 0 errors,
   0 warnings.
 
-Not exercised live: the step that resumes once the fullscreen window closes
-(the window was the user's; covered by the decide tests), Sway (parser unit
-tests only).
+Not exercised live: Sway (parser unit tests only).
 
 Not exercised live: the lock-screen sample skip (would lock the user's
 session), clicking the control-center tile (not placed in this user's
