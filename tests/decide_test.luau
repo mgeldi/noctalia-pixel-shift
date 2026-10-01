@@ -75,7 +75,7 @@ t.test("decide: IPC commands fall back to the first output", function()
 end)
 
 t.test("decide: the vertical player holds while a scan runs and re-applies after it", function()
-	local base = { scanning = false, allowed = true, paused = false, v = 1, last = 1, fileActive = true, driftDue = false }
+	local base = { scanning = false, allowed = true, paused = false, v = 1, last = 1, fileActive = true, driftDue = false, covered = false }
 	local function with(p)
 		local st = table.clone(base)
 		for k, v in pairs(p) do
@@ -93,6 +93,87 @@ t.test("decide: the vertical player holds while a scan runs and re-applies after
 	t.eq(decide.verticalAction(with({ fileActive = false })), "none", "repairs wait for the drift check")
 	t.eq(decide.verticalAction(with({ allowed = false })), "clear")
 	t.eq(decide.verticalAction(with({ paused = true, fileActive = false })), "none")
+end)
+
+t.test("decide: a vertical step asks the compositor first and waits behind a fullscreen window", function()
+	local base = { scanning = false, allowed = true, paused = false, v = 2, last = 1, fileActive = true, driftDue = false }
+	local function with(p)
+		local st = table.clone(base)
+		for k, v in pairs(p) do
+			st[k] = v
+		end
+		return st
+	end
+	-- the scheduled step
+	local action, last = decide.verticalAction(with({ covered = nil }))
+	t.eq(action, "ask")
+	t.eq(last, 1, "nothing is applied, so the applied offset stays")
+	action, last = decide.verticalAction(with({ covered = true }))
+	t.eq(action, "defer")
+	t.eq(last, 1)
+	action, last = decide.verticalAction(with({ covered = false }))
+	t.eq(action, "apply")
+	t.eq(last, 2)
+	-- the repair of a deleted file
+	t.eq(decide.verticalAction(with({ fileActive = false, driftDue = true, v = 1, covered = nil })), "ask")
+	action, last = decide.verticalAction(with({ fileActive = false, driftDue = true, v = 1, covered = true }))
+	t.eq(action, "defer")
+	t.eq(last, 1)
+	t.eq(decide.verticalAction(with({ fileActive = false, driftDue = true, v = 1, covered = false })), "apply")
+	-- a leftover file with no shift scheduled
+	t.eq(decide.verticalAction(with({ fileActive = true, driftDue = true, v = 0, last = 0, covered = true })), "defer")
+	-- the first apply after a scan
+	action, last = decide.verticalAction(with({ last = -1, covered = true }))
+	t.eq(action, "defer")
+	t.eq(last, -1)
+	-- a step to 0 with no file in place reloads nothing: no need to wait
+	action, last = decide.verticalAction(with({ v = 0, last = 1, fileActive = false, covered = true }))
+	t.eq(action, "apply")
+	t.eq(last, 0)
+	t.eq(decide.verticalAction(with({ v = 0, last = -1, fileActive = false, covered = nil })), "apply")
+	t.eq(decide.verticalAction(with({ v = 0, last = 1, fileActive = true, covered = true })), "defer", "removing the file reloads")
+	-- nothing to do stays nothing, whatever is open
+	t.eq(decide.verticalAction(with({ v = 1, covered = true })), "none")
+	t.eq(decide.verticalAction(with({ v = 1, covered = nil })), "none")
+end)
+
+t.test("decide: what the user asks for does not wait for the compositor", function()
+	local base = { scanning = false, allowed = true, paused = false, v = 2, last = 1, fileActive = true, driftDue = false }
+	for _, covered in ipairs({ "unknown", "open", "none" }) do
+		local c = if covered == "unknown" then nil elseif covered == "open" then true else false
+		local function with(p)
+			local st = table.clone(base)
+			st.covered = c
+			for k, v in pairs(p) do
+				st[k] = v
+			end
+			return st
+		end
+		local action, last = decide.verticalAction(with({ allowed = false }))
+		t.eq(action, "clear", covered)
+		t.eq(last, 0)
+		t.eq(decide.verticalAction(with({ paused = true })), "clear", covered)
+		t.eq(decide.verticalAction(with({ paused = true, fileActive = false })), "none", covered)
+		action, last = decide.verticalAction(with({ scanning = true }))
+		t.eq(action, "hold", covered)
+		t.eq(last, -1)
+	end
+end)
+
+t.test("decide: the placeholder output of a monitorless session is not measured", function()
+	t.eq(decide.measurable("FALLBACK"), false)
+	t.eq(decide.measurable("DP-2"), true)
+	t.eq(decide.measurable("eDP-1"), true)
+end)
+
+t.test("decide: a measurement is blocked by a fullscreen window on its output, or anywhere while the override is on", function()
+	t.eq(decide.scanBlocked({ ["DP-2"] = true }, "DP-2", false), true, "own output covered")
+	t.eq(decide.scanBlocked({ ["DP-2"] = true }, "DP-2", true), true)
+	t.eq(decide.scanBlocked({ ["DP-3"] = true }, "DP-2", false), false, "other output, no override: no reload")
+	t.eq(decide.scanBlocked({ ["DP-3"] = true }, "DP-2", true), true, "the reload recreates the bar everywhere")
+	t.eq(decide.scanBlocked({}, "DP-2", true), false)
+	t.eq(decide.scanBlocked({}, "DP-2", false), false)
+	t.eq(decide.scanBlocked(nil, "DP-2", true), false)
 end)
 
 t.test("decide: the vertical base is refreshed only while no override is in effect", function()

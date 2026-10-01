@@ -7,6 +7,8 @@ local modules = {
 	"./tasks_test",
 	"./vertical_test",
 	"./decide_test",
+	"./fullscreen_test",
+	"./fullscreen_runtime_test",
 	"./filters_test",
 	"./budget_test",
 	"./labmodel_test",

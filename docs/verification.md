@@ -44,6 +44,33 @@ Measured with the `timing on` IPC event while driving the lab over IPC.
   covered.
 - Unit tests: 108 passed, kernels in sync.
 
+## 1.2.0 (2026-10-01): fullscreen windows
+
+- Cause, from Noctalia's log: every vertical step (every 30 min) and every
+  measurement with the override on reloaded the config, and each reload
+  recreated the bar on both outputs (`[bar] creating #0 "main" on DP-2` / `DP-3`).
+  Hyprland showed the new bar above a fullscreen game or video until the user
+  toggled fullscreen. Spacer width changes never recreate the bar.
+- Cost of asking: `hyprctl --batch "j/monitors;j/clients"` took about 1.8 ms
+  (9 KB of JSON); a grim strip capture about 5.9 ms, and an image-based check
+  needs two.
+- Live, with a real fullscreen `foot` window on DP-3 (`fullscreen: 2`):
+  - the debug line showed `fullscreen=hyprland:DP-3`;
+  - a pending vertical step waited ("vertical step waits, a fullscreen window
+    is open on DP-3"), logged once;
+  - `sample` skipped DP-3 ("sample skipped on DP-3 (fullscreen window)") and
+    sampled DP-2 (133 samples, was 132);
+  - `rescan` on DP-3 was postponed ("measuring DP-3 later, a fullscreen window
+    is open") and retried once a minute without logging again;
+  - horizontal widths kept changing on both outputs;
+  - no bar was recreated while the window stayed fullscreen.
+- Unit tests: 141 passed, kernels in sync; `noctalia plugins lint`: 0 errors,
+  0 warnings.
+
+Not exercised live: the step that resumes once the fullscreen window closes
+(the window was the user's; covered by the decide tests), Sway (parser unit
+tests only).
+
 Not exercised live: the lock-screen sample skip (would lock the user's
 session), clicking the control-center tile (not placed in this user's
 control center), the onboarding and "grim missing" states (spacers and grim
